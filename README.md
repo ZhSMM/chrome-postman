@@ -48,6 +48,35 @@ npm run build:all          # 生成图标 + 构建（UI 与 Service Worker 分�
 | `npm run pack` | 打包成 `release/chrome-postman-v1.0.0.zip` |
 | `node scripts/e2e-verify.mjs` | 真实 Chrome 端到端验证（8 项检查） |
 
+## GitHub Actions 自动发布
+
+仓库内置两条流水线：
+
+| 流水线 | 触发 | 做什么 |
+|---|---|---|
+| `.github/workflows/ci.yml` | push / PR 到 `main` | 类型检查 → 单元测试 → 构建 → 打包校验 → 上传 artifact |
+| `.github/workflows/release.yml` | 推送 `v*` tag / 手动触发 | 同步版本号 → 类型检查 → 单元测试 → 构建 → 打包 → **创建 GitHub Release 并附 zip** |
+
+发一个新版本：
+
+```bash
+npm run version:set -- v1.1.0    # 或者手动改 public/manifest.json
+git commit -am "release: v1.1.0"
+git tag v1.1.0
+git push origin main --follow-tags
+```
+
+流水线会自动把 `manifest.json` 的版本号对齐到 tag，产出
+`chrome-postman-v1.1.0.zip` 并挂到 Release 页面上。
+
+也可以在 GitHub 页面手动触发：Actions → Release → Run workflow → 填版本号。
+
+**首次发布（v1.0.0）已存在**：https://github.com/ZhSMM/chrome-postman/releases/tag/v1.0.0
+
+> 打包脚本用 Node 内置 zlib 自己实现 ZIP 编码，不依赖 `tar` / `zip` / PowerShell。
+> 原因是 GNU tar 的 `-a` 自动压缩**不支持 zip 格式**（只支持 gzip/bzip2/xz），
+> 在 Linux CI 上会生成一个"后缀叫 .zip 的 tar"，装到 Chrome 里直接失败。
+
 ## 目录结构
 
 ```

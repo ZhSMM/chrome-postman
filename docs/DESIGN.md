@@ -747,12 +747,44 @@ graph LR
 chrome://extensions → 开启「开发者模式」→「加载已解压的扩展程序」→ 选择 dist/
 ```
 
-### 15.3 发布前检查清单
+### 15.3 GitHub Actions 自动发布
+
+仓库内置两条流水线：
+
+| 流水线 | 文件 | 触发 | 步骤 |
+|---|---|---|---|
+| CI | `.github/workflows/ci.yml` | push / PR → `main` | checkout → setup-node → `npm ci` → 类型检查 → 单元测试 → 构建 → 打包校验 → 上传 artifact |
+| Release | `.github/workflows/release.yml` | 推送 `v*` tag / 手动触发 | 同上 + **同步 manifest 版本号** → **校验版本号与 tag 一致** → `gh release create` 附 zip |
+
+```mermaid
+graph LR
+    T["git tag v1.1.0<br/>git push origin v1.1.0"] --> W["Release workflow"]
+    W --> S["set-version.mjs<br/>manifest.version ← 1.1.0"]
+    S --> B["npm ci → typecheck → test → build"]
+    B --> P["pack.mjs → chrome-postman-v1.1.0.zip"]
+    P --> V{"manifest.version<br/>== tag ?"}
+    V -->|是| R["gh release create<br/>附 zip + 自动 release notes"]
+    V -->|否| E["::error:: 版本号不一致<br/>中止"]
+```
+
+**为什么必须有「同步版本号」这一步**：扩展的真实版本号只有 `manifest.json` 一个来源。如果 tag 是 `v1.1.0` 而 manifest 还是 `1.0.0`，用户装上去看到的仍是旧版本号，商店审核也会对不上。所以脚本只替换 `version` 那一行（`scripts/set-version.mjs` 用正则做文本替换，不整体重排 JSON），避免每次改版本都产生一片噪音 diff；流水线还会再校验一次，不一致直接 `::error::` 中止。
+
+**为什么打包器要自己实现**：跨平台调用外部命令不可靠 ——
+
+| 平台 | 常见做法 | 问题 |
+|---|---|---|
+| macOS | `tar -a -c -f x.zip`（bsdtar） | ✅ 可用 |
+| Linux CI | `tar -a -c -f x.zip`（GNU tar） | ❌ GNU tar 的 `-a` 只支持 gzip/bzip2/xz，**不支持 zip**，会生成"后缀叫 .zip 的 tar"，装到 Chrome 里直接失败 |
+| Windows | `Compress-Archive` | ✅ 可用但仅限 PowerShell |
+
+所以 `scripts/pack.mjs` 用 Node 内置 `zlib.deflateRawSync` 手写了最小 ZIP 格式（本地文件头 + 中央目录 + EOCD），零依赖、跨平台、行为确定。
+
+### 15.4 发布前检查清单
 
 - [ ] `npm run typecheck` 无错误
 - [ ] `npm test` 全绿
 - [ ] `npm run build:all` 成功，`dist/manifest.json` 存在
-- [ ] `node scripts/pack.mjs` 打包成功
+- [ ] `npm run pack` 打包成功
 - [ ] `node scripts/e2e-verify.mjs` 8 项全过
 - [ ] 商店页说明 `<all_urls>` 权限用途
 - [ ] 隐私政策声明"数据仅存本地"

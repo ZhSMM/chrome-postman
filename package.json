@@ -15,7 +15,8 @@
     "test:e2e": "node scripts/e2e-verify.mjs",
     "typecheck": "tsc --noEmit",
     "icons": "node scripts/gen-icons.mjs",
-    "pack": "npm run build:all && npm run icons && node scripts/pack.mjs"
+    "version:set": "node scripts/set-version.mjs",
+    "pack": "npm run build:all && node scripts/pack.mjs"
   },
   "dependencies": {
     "@codemirror/lang-html": "^6.4.9",
