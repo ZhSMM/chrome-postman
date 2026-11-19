@@ -35,9 +35,21 @@ if (!/^\d+(\.\d+){0,3}$/.test(version)) {
 
 const manifest = JSON.parse(readFileSync(MANIFEST, 'utf8'));
 const previous = manifest.version;
-manifest.version = version;
 
-// 保持 2 空格缩进 + 结尾换行，和仓库里其他 JSON 一致
-writeFileSync(MANIFEST, JSON.stringify(manifest, null, 2) + '\n', 'utf8');
+/**
+ * 只替换 version 那一行，保留文件里原有的手工排版。
+ * 如果整体重新 JSON.stringify，数组会被拆成多行，
+ * 每次改版本号都产生一大片无意义 diff。
+ */
+const text = readFileSync(MANIFEST, 'utf8');
+const patched = text.replace(/("version"\s*:\s*)"[^"]*"/, `$1"${version}"`);
+
+if (patched === text && previous !== version) {
+  // 没匹配到 version 字段，退回到整体重写
+  manifest.version = version;
+  writeFileSync(MANIFEST, JSON.stringify(manifest, null, 2) + '\n', 'utf8');
+} else {
+  writeFileSync(MANIFEST, patched, 'utf8');
+}
 
 console.log(`✓ manifest 版本号：${previous} → ${version}`);
