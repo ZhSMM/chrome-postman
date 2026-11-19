@@ -1,0 +1,56 @@
+# ============================================================
+# CI —— 每次 push / PR 都跑一遍
+# 目的：在合并前拦住"类型不过 / 测试挂了 / 构建产物不对"
+# ============================================================
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# 同一个分支的新提交会取消掉还没跑完的旧提交，节省 CI 配额
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: 类型检查 / 单元测试 / 构建
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 准备 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: TypeScript 类型检查
+        run: npm run typecheck
+
+      - name: 单元测试
+        run: npm test
+
+      - name: 构建（UI + Service Worker + 图标）
+        run: npm run build:all
+
+      - name: 打包并校验 zip 结构
+        run: |
+          node scripts/pack.mjs
+          unzip -l release/*.zip
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: chrome-postman-${{ github.sha }}
+          path: release/*.zip
+          retention-days: 14

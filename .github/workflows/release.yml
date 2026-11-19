@@ -1,0 +1,112 @@
+# ============================================================
+# Release —— 打 tag 自动产出可安装的扩展包并创建 GitHub Release
+# ============================================================
+#
+# 【触发方式】
+#   1. 推送 tag：git tag v1.1.0 && git push origin v1.1.0
+#   2. 手动触发：Actions → Release → Run workflow → 填版本号
+#
+# 【流程】
+#   同步 manifest 版本号 → 类型检查 → 单元测试 → 构建 → 打包 → 创建 Release
+#
+# 【为什么要同步版本号】
+#   扩展的真实版本号只有 manifest.json 一个来源。
+#   如果 tag 是 v1.1.0 而 manifest 还是 1.0.0，
+#   用户装上去看到的仍是旧版本号，商店审核也会对不上。
+#   所以这里用 scripts/set-version.mjs 先对齐再构建。
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '要发布的版本号，例如 v1.0.0'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: 构建并发布
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 准备 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      # --- 算出这次的发布标签（tag 推送 or 手动触发）---
+      - name: 准备发布标签
+        id: prep
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            RAW="${{ inputs.version }}"
+          else
+            RAW="${{ github.ref_name }}"
+          fi
+          TAG="$RAW"
+          case "$TAG" in v*) ;; *) TAG="v$TAG" ;; esac
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "发布标签: $TAG"
+
+      - name: 同步 manifest 版本号
+        run: node scripts/set-version.mjs "${{ steps.prep.outputs.tag }}"
+
+      - name: TypeScript 类型检查
+        run: npm run typecheck
+
+      - name: 单元测试
+        run: npm test
+
+      - name: 构建（UI + Service Worker + 图标）
+        run: npm run build:all
+
+      - name: 打包
+        run: node scripts/pack.mjs
+
+      # 确认 manifest 里的版本号确实和 tag 对上了
+      - name: 校验版本号与产物结构
+        run: |
+          TAG="${{ steps.prep.outputs.tag }}"
+          VERIFIED=$(node -p "require('./dist/manifest.json').version")
+          echo "tag=$TAG  manifest.version=$VERIFIED"
+          if [ "$VERIFIED" != "${TAG#v}" ]; then
+            echo "::error::manifest 版本号($VERIFIED)与 tag($TAG)不一致"
+            exit 1
+          fi
+          unzip -l release/*.zip
+
+      - name: 创建 GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.prep.outputs.tag }}
+        run: |
+          gh release create "$TAG" release/*.zip \
+            --title "Chrome Postman $TAG" \
+            --generate-notes \
+            --target "$GITHUB_SHA"
+
+      - name: 上传构建产物到 Actions
+        uses: actions/upload-artifact@v4
+        with:
+          name: chrome-postman-${{ steps.prep.outputs.tag }}
+          path: release/*.zip
+          retention-days: 30

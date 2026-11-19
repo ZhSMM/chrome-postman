@@ -26,7 +26,8 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 const CHROME = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
-const DIST = resolve(process.cwd(), 'dist');
+// 默认验证 dist/；也可以传参验证"解压后的 zip"，确保打包产物本身可用
+const DIST = resolve(process.cwd(), process.argv[2] ?? 'dist');
 const SHOT_DIR = resolve(process.cwd(), 'docs/screenshots');
 const PORT = 8765;
 const CDP_PORT = 9444;
