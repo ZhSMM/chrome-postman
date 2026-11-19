@@ -41,10 +41,10 @@ jobs:
 
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: 准备 Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '22'
           cache: npm
@@ -105,7 +105,7 @@ jobs:
             --target "$GITHUB_SHA"
 
       - name: 上传构建产物到 Actions
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: chrome-postman-${{ steps.prep.outputs.tag }}
           path: release/*.zip
