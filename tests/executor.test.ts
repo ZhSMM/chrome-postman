@@ -226,7 +226,11 @@ describe('executeRequest —— 完整管线', () => {
       { fetchImpl: fakeFetch() as any },
     );
 
-    expect(result.outcome.error).toContain('脚本炸了');
+    // v1.2 起 outcome.error 是结构化对象
+    expect(result.outcome.error?.message).toContain('脚本炸了');
+    expect(result.outcome.error?.location?.line).toBe(1);
+    // 顶层 error 仍是一句可读摘要（toast 用）
+    expect(result.error).toContain('脚本炸了');
     expect(result.response?.status).toBe(200);
   });
 

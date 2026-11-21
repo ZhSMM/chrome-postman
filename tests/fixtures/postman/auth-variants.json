@@ -1,0 +1,155 @@
+{
+  "info": {
+    "_postman_id": "1a2b3c4d-2222-4333-8444-555566667777",
+    "name": "鉴权方式样例",
+    "description": "同一个集合里放齐 Postman 支持的各种鉴权方式，用来验证导入时的映射与降级提示。",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "无鉴权",
+      "request": {
+        "method": "GET",
+        "url": { "raw": "https://api.example.com/public/ping" },
+        "auth": { "type": "noauth" }
+      }
+    },
+    {
+      "name": "Basic 鉴权",
+      "request": {
+        "method": "GET",
+        "url": { "raw": "https://api.example.com/basic" },
+        "auth": {
+          "type": "basic",
+          "basic": [
+            { "key": "username", "value": "demo", "type": "string" },
+            { "key": "password", "value": "s3cret", "type": "string" }
+          ]
+        }
+      }
+    },
+    {
+      "name": "Bearer 鉴权",
+      "request": {
+        "method": "GET",
+        "url": { "raw": "https://api.example.com/bearer" },
+        "auth": {
+          "type": "bearer",
+          "bearer": [{ "key": "token", "value": "{{authToken}}", "type": "string" }]
+        }
+      }
+    },
+    {
+      "name": "ApiKey 鉴权（Header）",
+      "request": {
+        "method": "GET",
+        "url": { "raw": "https://api.example.com/apikey/header" },
+        "auth": {
+          "type": "apikey",
+          "apikey": [
+            { "key": "key", "value": "X-Api-Key", "type": "string" },
+            { "key": "value", "value": "{{apiKey}}", "type": "string" },
+            { "key": "in", "value": "header", "type": "string" }
+          ]
+        }
+      }
+    },
+    {
+      "name": "ApiKey 鉴权（Query）",
+      "request": {
+        "method": "GET",
+        "url": { "raw": "https://api.example.com/apikey/query" },
+        "auth": {
+          "type": "apikey",
+          "apikey": [
+            { "key": "key", "value": "api_key", "type": "string" },
+            { "key": "value", "value": "{{apiKey}}", "type": "string" },
+            { "key": "in", "value": "query", "type": "string" }
+          ]
+        }
+      }
+    },
+    {
+      "name": "OAuth2 鉴权",
+      "request": {
+        "method": "GET",
+        "url": { "raw": "https://api.example.com/oauth2" },
+        "auth": {
+          "type": "oauth2",
+          "oauth2": [{ "key": "accessToken", "value": "{{accessToken}}", "type": "string" }]
+        }
+      }
+    },
+    {
+      "name": "Digest 鉴权",
+      "request": {
+        "method": "GET",
+        "url": { "raw": "https://api.example.com/digest" },
+        "auth": {
+          "type": "digest",
+          "digest": [
+            { "key": "username", "value": "demo", "type": "string" },
+            { "key": "password", "value": "s3cret", "type": "string" }
+          ]
+        }
+      }
+    },
+    {
+      "name": "Hawk 鉴权",
+      "request": {
+        "method": "GET",
+        "url": { "raw": "https://api.example.com/hawk" },
+        "auth": {
+          "type": "hawk",
+          "hawk": [
+            { "key": "authId", "value": "dh37fgj492je", "type": "string" },
+            { "key": "authKey", "value": "werxhqb98rpaxn39848xrunpaw3489ruq", "type": "string" }
+          ]
+        }
+      }
+    },
+    {
+      "name": "AWS SigV4 鉴权",
+      "request": {
+        "method": "GET",
+        "url": { "raw": "https://api.example.com/awsv4" },
+        "auth": {
+          "type": "awsv4",
+          "awsv4": [
+            { "key": "accessKey", "value": "AKIAEXAMPLEPLACEHOLDER0", "type": "string" },
+            { "key": "secretKey", "value": "PLACEHOLDERSECRETKEYNOTAREALKEY0000", "type": "string" },
+            { "key": "region", "value": "us-east-1", "type": "string" }
+          ]
+        }
+      }
+    },
+    {
+      "name": "EdgeGrid 鉴权",
+      "request": {
+        "method": "GET",
+        "url": { "raw": "https://api.example.com/edgegrid" },
+        "auth": {
+          "type": "edgegrid",
+          "edgegrid": [
+            { "key": "username", "value": "demo", "type": "string" },
+            { "key": "password", "value": "s3cret", "type": "string" }
+          ]
+        }
+      }
+    },
+    {
+      "name": "NTLM 鉴权",
+      "request": {
+        "method": "GET",
+        "url": { "raw": "https://api.example.com/ntlm" },
+        "auth": {
+          "type": "ntlm",
+          "ntlm": [
+            { "key": "username", "value": "demo", "type": "string" },
+            { "key": "password", "value": "s3cret", "type": "string" }
+          ]
+        }
+      }
+    }
+  ]
+}

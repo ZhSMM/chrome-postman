@@ -4,10 +4,13 @@
  * 【设计要点】
  * - 每行有"启用"开关（Postman 里的眼睛图标），关闭的行不参与请求
  * - 增删改全部走 onChange 上抛，组件本身不持有状态（受控组件）
+ * - 传入 sources 就启用智能补全，不传就是普通输入框
  */
 import { useMemo } from 'react';
 import type { KeyValue } from '../../shared/types';
 import { uid } from '../../shared/utils';
+import SmartInput from './SmartInput';
+import type { CompletionSources } from '../../core/completion';
 
 interface Props {
   value: KeyValue[];
@@ -19,6 +22,12 @@ interface Props {
   /** 额外的列：描述 */
   withDescription?: boolean;
   emptyHint?: string;
+  /**
+   * 补全候选源。
+   * 传了就启用智能补全（Headers / Query 参数用）；
+   * 不传就是普通输入框（环境变量表用，那里的变量名就是它自己）。
+   */
+  sources?: CompletionSources;
 }
 
 export default function KeyValueTable({
@@ -29,6 +38,7 @@ export default function KeyValueTable({
   secret = false,
   withDescription = false,
   emptyHint,
+  sources,
 }: Props) {
   const rows = value ?? [];
 
@@ -72,21 +82,42 @@ export default function KeyValueTable({
                 </button>
               </td>
               <td>
-                <input
-                  className="key"
-                  value={row.key}
-                  placeholder={keyPlaceholder}
-                  onChange={(e) => update(index, { key: e.target.value })}
-                />
+                {sources ? (
+                  <SmartInput
+                    className="key"
+                    value={row.key}
+                    placeholder={keyPlaceholder}
+                    onChange={(v) => update(index, { key: v })}
+                    sources={sources}
+                  />
+                ) : (
+                  <input
+                    className="key"
+                    value={row.key}
+                    placeholder={keyPlaceholder}
+                    onChange={(e) => update(index, { key: e.target.value })}
+                  />
+                )}
               </td>
               <td>
-                <input
-                  className="mono"
-                  value={row.value}
-                  type={secret ? 'password' : 'text'}
-                  placeholder={valuePlaceholder}
-                  onChange={(e) => update(index, { value: e.target.value })}
-                />
+                {sources ? (
+                  <SmartInput
+                    className="mono"
+                    value={row.value}
+                    type={secret ? 'password' : 'text'}
+                    placeholder={valuePlaceholder}
+                    onChange={(v) => update(index, { value: v })}
+                    sources={sources}
+                  />
+                ) : (
+                  <input
+                    className="mono"
+                    value={row.value}
+                    type={secret ? 'password' : 'text'}
+                    placeholder={valuePlaceholder}
+                    onChange={(e) => update(index, { value: e.target.value })}
+                  />
+                )}
               </td>
               {withDescription && (
                 <td>

@@ -26,6 +26,10 @@ import { MSG } from '../shared/messages';
 import type { ExecutionResult, HttpRequest, VariableScope } from '../shared/types';
 import { executeRequest } from '../core/request-executor';
 import { NetErrorBuffer } from '../core/network-diagnostics';
+import { TimingBuffer } from '../core/timing';
+import { decideSsl } from '../core/certificate';
+import { createBridgeSender, inspectCertificate } from '../core/native-bridge';
+import { nativeHostClient, probeNativeHost } from './native-host';
 import {
   getActiveEnvironmentId,
   getCollections,
@@ -56,6 +60,15 @@ const sessionVariables: Record<string, string> = {};
  */
 const netErrors = new NetErrorBuffer();
 
+/**
+ * 分段耗时采集缓冲。
+ *
+ * 数据来自 chrome.webRequest 的四个事件（beforeRequest / sendHeaders /
+ * responseStarted / completed）的时间戳。webRequest 的 timeStamp
+ * 只保证内部一致，所以只能用它们之间的差值算耗时。
+ */
+const timings = new TimingBuffer();
+
 /** 是否已经注册了 webRequest 监听器 */
 let webRequestWatching = false;
 /** 注册过程本身的 Promise，避免并发重复注册（权限授予事件与 SW 唤醒可能同时触发） */
@@ -71,7 +84,7 @@ async function hasWebRequestPermission(): Promise<boolean> {
 }
 
 /**
- * 注册网络错误监听器。
+ * 注册网络错误监听器 + 耗时采集监听器。
  *
  * 【为什么要有权限才注册】
  * webRequest 是可选权限，用户没授予时调用 addListener 会直接抛错，
@@ -104,6 +117,34 @@ function startNetworkWatcher(): Promise<void> {
         },
         { urls: ['<all_urls>'] },
       );
+
+      /*
+       * 耗时采集：四个事件各取一个时间戳，就能算出三段耗时。
+       *
+       * 【为什么用同一个 filter】
+       * 四个监听器必须看到同一批请求，否则时间戳对不上、算出来的分段是错的。
+       */
+      const timingFilter = { urls: ['<all_urls>'] };
+      const record = (
+        phase: 'beforeRequest' | 'sendHeaders' | 'responseStarted' | 'completed',
+      ) =>
+        (details: any) => {
+          timings.add({
+            requestId: details.requestId,
+            url: details.url,
+            method: details.method,
+            phase,
+            timeStamp: details.timeStamp,
+            ip: details.ip,
+            fromCache: details.fromCache,
+          });
+        };
+
+      chrome.webRequest.onBeforeRequest.addListener(record('beforeRequest'), timingFilter);
+      chrome.webRequest.onSendHeaders.addListener(record('sendHeaders'), timingFilter);
+      chrome.webRequest.onResponseStarted.addListener(record('responseStarted'), timingFilter);
+      chrome.webRequest.onCompleted.addListener(record('completed'), timingFilter);
+
       webRequestWatching = true;
       console.info('[sw] 网络诊断已启用');
     } catch (err) {
@@ -187,6 +228,8 @@ async function recordHistory(
     duration,
     timestamp: Date.now(),
     collectionId: request.collectionId,
+    // 这次是不是跳过了证书校验 —— 历史里要留个记号，方便回溯风险
+    insecure: result.insecure,
   };
   await addHistory(item);
   await pruneHistory(settings.historyLimit);
@@ -215,6 +258,32 @@ chrome.runtime.onMessage.addListener((message: any, _sender, sendResponse) => {
       return true;
     }
 
+    case MSG.PROBE_BRIDGE: {
+      probeNativeHost()
+        .then((status) => sendResponse({ type: 'BRIDGE_STATUS', payload: status }))
+        .catch((err) =>
+          sendResponse({
+            type: 'BRIDGE_STATUS',
+            payload: { available: false, error: err?.message ?? String(err), checkedAt: Date.now() },
+          }),
+        );
+      return true;
+    }
+
+    case MSG.INSPECT_CERT: {
+      const url = message.payload?.url as string;
+      const timeoutMs = (message.payload?.timeoutMs as number) || 10000;
+      inspectCertificate(nativeHostClient, url, timeoutMs)
+        .then((cert) => sendResponse({ type: 'CERT_INFO', payload: { ok: true, cert } }))
+        .catch((err) =>
+          sendResponse({
+            type: 'CERT_INFO',
+            payload: { ok: false, error: err?.message ?? String(err) },
+          }),
+        );
+      return true;
+    }
+
     default:
       return false;
   }
@@ -227,6 +296,36 @@ async function handleExecute(request: HttpRequest, requestId: string): Promise<E
   const scope = await buildScope(request);
   const settings = await getSettings();
 
+  /*
+   * ---------- SSL 决策 ----------
+   *
+   * 【为什么请求级覆盖优先于全局】
+   * 大多数接口是正常签发的，只有个别内网服务是自签名证书。
+   * 为了一个请求去改全局设置太粗放。
+   */
+  const effectiveMode = request.sslMode ?? settings.sslMode;
+  /*
+   * 【为什么"跳过校验"必须同时要求 native-bridge 模式】
+   * 浏览器自己发的请求**不可能**跳过证书校验 —— 那是 Chromium 网络栈的事。
+   * 所以只有在用户明确选了「本地桥接」时，"跳过校验"才有意义。
+   * 换句话说：跳过校验 = 本地桥接 + 不校验，两个条件缺一不可。
+   */
+  const effectiveAllowInsecure =
+    settings.allowInsecureTls && effectiveMode === 'native-bridge';
+
+  // 只有真的要走桥接时才去探测，避免每个请求都去 ping 一���伴生程序
+  let bridgeAvailable = false;
+  if (effectiveMode === 'native-bridge' || effectiveAllowInsecure) {
+    const probe = await probeNativeHost();
+    bridgeAvailable = probe.available;
+  }
+
+  const decision = decideSsl({
+    mode: effectiveMode,
+    allowInsecure: effectiveAllowInsecure,
+    bridgeAvailable,
+  });
+
   const outcome = await executeRequest(request, scope, {
     timeout: settings.timeout,
     followRedirects: settings.followRedirects,
@@ -234,6 +333,16 @@ async function handleExecute(request: HttpRequest, requestId: string): Promise<E
     // 把网络错误码查询能力注入执行器，失败时才能给出精确原因
     getNetError: (url) => netErrors.find(url)?.error,
     proxyHint: settings.proxyHint,
+    // 分段耗时（复用同一个 webRequest 权限）
+    getTiming: (url) => timings.find(url) ?? undefined,
+    /*
+     * 发送网关：走桥接还是走浏览器原生，由 SSL 决策说了算。
+     * 不传 sender 时，执行器默认用浏览器原生 fetch。
+     */
+    sender: decision.useBridge ? createBridgeSender(nativeHostClient) : undefined,
+    ssl: { mode: effectiveMode, allowInsecure: decision.allowInsecure },
+    // 降级提示原样带下去，UI 必须显示出来 —— 绝不静默降级
+    sslNotice: decision.notice,
   });
 
   // 变量落盘
@@ -253,6 +362,9 @@ async function handleExecute(request: HttpRequest, requestId: string): Promise<E
     error: outcome.error,
     diagnostic: outcome.diagnostic,
     totalTime: outcome.totalTime,
+    timing: outcome.timing,
+    insecure: outcome.insecure,
+    sslNotice: outcome.sslNotice,
   };
 }
 

@@ -151,12 +151,14 @@ async function evaluate(client, expression, userGestures = false) {
 let browser = null;
 let page = null;
 let exitCode = 0;
+// 声明在 try 外面：finally 块要拿它来清理临时目录
+let testExtDir = null;
 try {
   const version = await waitForDevTools();
   browser = connect(version.webSocketDebuggerUrl);
   await browser.ready;
 
-  const testExtDir = prepareTestExtension();
+  testExtDir = prepareTestExtension();
   console.log(`[3/5] 测试变体扩展目录：${testExtDir}`);
 
   await browser.send('Extensions.loadUnpacked', { path: testExtDir });
@@ -247,6 +249,13 @@ try {
   proxy.close();
   try {
     rmSync(profile, { recursive: true, force: true });
+  } catch {
+    /* ignore */
+  }
+  // 测试变体扩展目录也要清掉 —— 之前只清了 profile，
+  // 结果临时目录里每次跑都多留一份 dist/ 的副本。
+  try {
+    if (typeof testExtDir === 'string') rmSync(testExtDir, { recursive: true, force: true });
   } catch {
     /* ignore */
   }

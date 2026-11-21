@@ -18,6 +18,10 @@ export const MSG = {
   PONG: 'PONG' as const,
   /** 通用错误 */
   ERROR: 'ERROR' as const,
+  /** UI 请求探测本地桥接程序是否就绪 */
+  PROBE_BRIDGE: 'PROBE_BRIDGE' as const,
+  /** UI 请求读取某个地址的证书详情 */
+  INSPECT_CERT: 'INSPECT_CERT' as const,
 } as const;
 
 export type MsgType = (typeof MSG)[keyof typeof MSG];

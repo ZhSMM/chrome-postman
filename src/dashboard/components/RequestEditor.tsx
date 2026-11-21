@@ -7,8 +7,9 @@
  *   前置脚本 —— 请求发出**之前**执行，可改写 URL / 头 / 体 / 方法
  *   后置脚本 —— 响应回来**之后**执行，可读响应、写断言、提取变量
  */
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useAppStore } from '../store';
+import { useCompletionSources } from '../useCompletionSources';
 import KeyValueTable from './KeyValueTable';
 import BodyEditor from './BodyEditor';
 import ScriptEditor from './ScriptEditor';
@@ -39,7 +40,28 @@ export default function RequestEditor() {
   const [tab, setTab] = useState<TabKey>('params');
   const request = store.currentRequest;
 
+  /** 补全候选源（Params / Headers / Body / 脚本都靠它） */
+  const sources = useCompletionSources();
+
   const auth = request.auth ?? { type: 'none' as AuthType };
+
+  /** 最近一次脚本错误（结构化，带行列号） */
+  const scriptError = store.outcome?.error;
+  /** 错误跳转请求 */
+  const focus = store.scriptFocus;
+
+  /**
+   * 收到跳转请求时，自动切到对应的脚本标签页。
+   * 否则用户点了 Console 里的"第 3 行"，但当前停在 Params 页，
+   * 什么都不会发生 —— 那就等于没做这个功能。
+   */
+  useEffect(() => {
+    if (!focus) return;
+    if (focus.phase === 'pre') setTab('pre');
+    else setTab('post');
+    // 只在 token 变化时触发
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focus?.token]);
 
   return (
     <div className="editor-area">
@@ -71,6 +93,7 @@ export default function RequestEditor() {
             keyPlaceholder="参数名"
             valuePlaceholder="参数值"
             emptyHint="还没有 query 参数"
+            sources={sources}
           />
         </div>
       )}
@@ -83,6 +106,7 @@ export default function RequestEditor() {
             keyPlaceholder="Header 名"
             valuePlaceholder="Header 值"
             emptyHint="还没有自定义请求头"
+            sources={sources}
           />
         </div>
       )}
@@ -91,6 +115,7 @@ export default function RequestEditor() {
         <BodyEditor
           value={request.body}
           onChange={(body) => store.patchCurrentRequest({ body })}
+          sources={sources}
         />
       )}
 
@@ -190,6 +215,9 @@ export default function RequestEditor() {
           <ScriptEditor
             value={request.preScript ?? ''}
             onChange={(preScript) => store.patchCurrentRequest({ preScript })}
+            error={scriptError?.location?.phase === 'pre' ? scriptError : undefined}
+            focus={focus?.phase === 'pre' ? { line: focus.line, token: focus.token } : null}
+            sources={sources}
           />
           <div className="muted" style={{ padding: '8px 12px', fontSize: 12 }}>
             请求发出<b>之前</b>执行。可用：<span className="mono">pm.request.headers.upsert()</span>、
@@ -204,6 +232,9 @@ export default function RequestEditor() {
           <ScriptEditor
             value={request.postScript ?? ''}
             onChange={(postScript) => store.patchCurrentRequest({ postScript })}
+            error={scriptError?.location?.phase === 'post' ? scriptError : undefined}
+            focus={focus?.phase === 'post' ? { line: focus.line, token: focus.token } : null}
+            sources={sources}
           />
           <div className="muted" style={{ padding: '8px 12px', fontSize: 12 }}>
             响应返回<b>之后</b>执行。可用：<span className="mono">pm.response.json()</span>、

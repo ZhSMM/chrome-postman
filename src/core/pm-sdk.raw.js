@@ -359,6 +359,122 @@
     return this._assert(isEmpty, 'expected value to be empty', 'expected value not to be empty');
   };
 
+  /* ---------------------------------------------------------------
+   * 4b. 响应相关断言
+   *
+   * 【为什么单独开一块】
+   * 上面这些断言是对"任意值"用的（equal、include…），
+   * 而 header / jsonBody / body / json 这几个是专门针对**响应**的。
+   * 它们在 Postman 里非常常用，从 Postman 迁过来的用户会直接写，
+   * 所以这里补上，避免用户写了却报错。
+   * ------------------------------------------------------------- */
+
+  /**
+   * 断言响应头存在（或值相等）。
+   * 用法：pm.response.to.have.header('Content-Type');
+   *      pm.response.to.have.header('Content-Type', 'application/json');
+   */
+  Assertion.prototype.header = function (name, value) {
+    var headers = this._value && this._value.headers ? this._value.headers : null;
+    var actual = undefined;
+    if (headers) {
+      if (typeof headers.get === 'function') {
+        actual = headers.get(name);
+      } else if (typeof headers === 'object') {
+        // 兜底：headers 是普通对象时，按 key 大小写不敏感地找
+        var lower = String(name).toLowerCase();
+        var keys = Object.keys(headers);
+        for (var i = 0; i < keys.length; i += 1) {
+          if (keys[i].toLowerCase() === lower) {
+            actual = headers[keys[i]];
+            break;
+          }
+        }
+      }
+    }
+    var has = actual !== undefined && actual !== null;
+    if (arguments.length > 1 && has) {
+      has = String(actual) === String(value);
+    }
+    var expected = arguments.length > 1
+      ? 'expected header "' + name + '" to equal "' + value + '"'
+      : 'expected header "' + name + '" to exist';
+    var negated = arguments.length > 1
+      ? 'expected header "' + name + '" not to equal "' + value + '"'
+      : 'expected header "' + name + '" not to exist';
+    return this._assert(has, expected, negated);
+  };
+
+  /**
+   * 断言响应体是合法 JSON，且某个路径的值符合预期。
+   * 用法：pm.response.to.have.jsonBody('data.id', 42);
+   *      pm.response.to.have.jsonBody('ok');          // 只检查字段存在
+   */
+  Assertion.prototype.jsonBody = function (path, value) {
+    var parsed = null;
+    var raw = this._value && this._value.body !== undefined ? String(this._value.body) : '';
+    try {
+      parsed = JSON.parse(raw);
+    } catch (e) {
+      return this._assert(
+        false,
+        'expected response body to be valid JSON',
+        'expected response body not to be valid JSON',
+      );
+    }
+    // 支持 'a.b.c' 这样的路径写法
+    var parts = String(path).split('.');
+    var actual = parsed;
+    for (var i = 0; i < parts.length; i += 1) {
+      if (actual === null || actual === undefined) break;
+      actual = actual[parts[i]];
+    }
+    var has = actual !== undefined;
+    if (arguments.length > 1 && has) {
+      has = deepEqual(actual, value);
+    }
+    var expected = arguments.length > 1
+      ? 'expected json body at "' + path + '" to equal ' + JSON.stringify(value)
+      : 'expected json body to have "' + path + '"';
+    var negated = arguments.length > 1
+      ? 'expected json body at "' + path + '" not to equal ' + JSON.stringify(value)
+      : 'expected json body not to have "' + path + '"';
+    return this._assert(has, expected, negated);
+  };
+
+  /**
+   * 断言响应体包含某段文本。
+   * 用法：pm.response.to.have.body('"ok":true');
+   */
+  Assertion.prototype.body = function (text) {
+    var raw = this._value && this._value.body !== undefined ? String(this._value.body) : '';
+    var has = raw.indexOf(String(text)) !== -1;
+    return this._assert(
+      has,
+      'expected response body to contain "' + text + '"',
+      'expected response body not to contain "' + text + '"',
+    );
+  };
+
+  /**
+   * 断言响应体是合法 JSON。
+   * 用法：pm.response.to.be.json();
+   */
+  Assertion.prototype.json = function () {
+    var raw = this._value && this._value.body !== undefined ? String(this._value.body) : '';
+    var ok = true;
+    try {
+      JSON.parse(raw);
+    } catch (e) {
+      ok = false;
+    }
+    return this._assert(
+      ok,
+      'expected response body to be valid JSON',
+      'expected response body not to be valid JSON',
+    );
+  };
+
   function expect(value) {
     return new Assertion(value, false, false);
   }

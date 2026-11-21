@@ -212,3 +212,41 @@ const sizeKb = (zip.length / 1024).toFixed(1);
 console.log(`✓ 打包完成：${zipPath} (${sizeKb} KB, ${entries.length} 个文件)`);
 console.log(`  在 chrome://extensions 打开「开发者模式」→「加载已解压的扩展程序」→ 选择 dist/`);
 console.log(`  上传商店时直接用这个 zip（解压后 manifest.json 必须在根目录）`);
+
+/* ------------------------------------------------------------------
+ * 5. 本地桥接程序（可选产物）
+ * ---------------------------------------------------------------- */
+
+/*
+ * 【为什么伴生程序要单独打包，不塞进扩展包】
+ *
+ * 1. 伴生程序是**独立进程**，不是扩展的一部分。
+ *    Chrome 的 native messaging 要求它躺在磁盘上某个固定位置，
+ *    由注册表（或约定目录）指向它 —— 放在扩展包里没有意义。
+ * 2. 绝大多数用户**不需要**它（浏览器本来就能校验证书）。
+ *    让它进扩展包，商店审核会看到一堆可执行脚本，反而增加麻烦。
+ * 3. 单独打包后，Release 页面上就是两个附件：
+ *    - chrome-postman-v1.2.0.zip          ← 扩展本体，人人都会装
+ *    - chrome-postman-native-host-v1.2.0.zip ← 只有需要跳过证书校验的人才下载
+ *
+ * 解压后的结构是扁平的（bridge.mjs / install-host.ps1 直接在根目录），
+ * 这样用户执行 install-host.ps1 时，脚本能用自己的 $PSScriptRoot 找到 bridge.mjs。
+ */
+const NATIVE_HOST_DIR = resolve(ROOT, 'native-host');
+if (existsSync(NATIVE_HOST_DIR)) {
+  const nativeFiles = collectFiles(NATIVE_HOST_DIR).sort();
+  const nativeEntries = nativeFiles.map((relPath) => ({
+    name: relPath,
+    data: readFileSync(resolve(NATIVE_HOST_DIR, relPath)),
+  }));
+
+  const nativeZipPath = resolve(OUT_DIR, `chrome-postman-native-host-v${manifest.version}.zip`);
+  if (existsSync(nativeZipPath)) rmSync(nativeZipPath);
+  const nativeZip = encodeZip(nativeEntries);
+  writeFileSync(nativeZipPath, nativeZip);
+
+  console.log(
+    `✓ 打包完成：${nativeZipPath} (${(nativeZip.length / 1024).toFixed(1)} KB, ${nativeEntries.length} 个文件)`,
+  );
+  console.log(`  只有需要跳过证书校验的用户才需要它；不装也能正常用扩展`);
+}

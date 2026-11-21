@@ -17,6 +17,10 @@ import Sidebar from './components/Sidebar';
 import RequestEditor from './components/RequestEditor';
 import ResponsePanel from './components/ResponsePanel';
 import EnvManager from './components/EnvManager';
+import VariableHints from './components/VariableHints';
+import SmartInput from './components/SmartInput';
+import SslSettings from './components/SslSettings';
+import { useCompletionSources } from './useCompletionSources';
 import type { HttpMethod, VariableScope } from '../shared/types';
 import { toCurl, toHar } from '../core/codelib';
 import { keyValuesToRecord } from '../core/storage';
@@ -106,6 +110,9 @@ export default function App() {
   };
 
   const activeEnv = store.environments.find((item) => item.id === store.activeEnvId);
+
+  /** 补全候选源（变量、内置变量、pm API、常用请求头、历史 URL） */
+  const sources = useCompletionSources();
 
   return (
     <div className="app">
@@ -226,15 +233,36 @@ export default function App() {
               ))}
             </select>
 
-            <input
-              className="url-input"
-              placeholder="输入请求地址，支持 {{变量}}"
-              value={store.currentRequest.url}
-              onChange={(e) => store.patchCurrentRequest({ url: e.target.value })}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') store.send();
-              }}
-            />
+            <div className="url-field">
+              <SmartInput
+                className="url-input"
+                placeholder="输入请求地址，支持 {{变量}}"
+                value={store.currentRequest.url}
+                onChange={(v) => store.patchCurrentRequest({ url: v })}
+                onEnter={() => store.send()}
+                enterSends
+                sources={sources}
+              />
+              {/*
+                变量缺失提示。
+                放在 URL 框正下方，用户一眼就能看到"哪个变量没定义"，
+                不用等发送失败才发现。
+              */}
+              <VariableHints
+                text={store.currentRequest.url}
+                scope={scope}
+                onApply={(name, value) => {
+                  // 把 URL 里的 {{name}} 全部替换成候选变量的实际值
+                  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                  const next = store.currentRequest.url.replace(
+                    new RegExp(`\\{\\{\\s*${escaped}\\s*\\}\\}`, 'g'),
+                    value,
+                  );
+                  store.patchCurrentRequest({ url: next });
+                  store.pushToast(`已把 {{${name}}} 替换为「${value}」`, 'success');
+                }}
+              />
+            </div>
 
             <input
               style={{ width: 160 }}
@@ -245,7 +273,15 @@ export default function App() {
           </div>
 
           <RequestEditor />
-          <ResponsePanel response={store.response} outcome={store.outcome} diagnostic={store.diagnostic} />
+          <ResponsePanel
+            response={store.response}
+            outcome={store.outcome}
+            diagnostic={store.diagnostic}
+            timing={store.timing}
+            insecure={store.insecure}
+            sslNotice={store.sslNotice}
+            onFocusScriptError={store.focusScriptError}
+          />
         </main>
       </div>
 
@@ -415,6 +451,9 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
             填写后，代理相关的报错会额外提醒你检查这个代理地址。
             工具本身<b>不会修改</b>你的代理设置。
           </div>
+
+          {/* ---------- 证书与 SSL ---------- */}
+          <SslSettings />
 
           <div className="divider" />
           <div className="faint" style={{ fontSize: 12, lineHeight: 1.8 }}>

@@ -40,13 +40,21 @@ jobs:
       - name: 单元测试
         run: npm test
 
+      - name: 伴生程序自测（native messaging 协议）
+        run: node native-host/selftest.mjs
+
       - name: 构建（UI + Service Worker + 图标）
         run: npm run build:all
 
+      # pack.mjs 现在会产出两个 zip（扩展本体 + 伴生程序），
+      # 所以这里要逐个列，不能用 `unzip -l release/*.zip`（那会把两个文件都传给 unzip）。
       - name: 打包并校验 zip 结构
         run: |
           node scripts/pack.mjs
-          unzip -l release/*.zip
+          for z in release/*.zip; do
+            echo "=== $z ==="
+            unzip -l "$z"
+          done
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v7

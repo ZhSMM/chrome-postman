@@ -1,0 +1,162 @@
+{
+  "info": {
+    "_postman_id": "0f3c1a70-1111-4222-8333-444455556666",
+    "name": "示例 REST API",
+    "description": "覆盖常见请求形态的演示集合：查询参数、多种请求体、请求脚本与示例响应。",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "用户中心",
+      "item": [
+        {
+          "name": "查询用户列表",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Accept", "value": "application/json" },
+              { "key": "X-Request-Id", "value": "{{requestId}}", "description": "链路追踪 ID" },
+              { "key": "X-Debug", "value": "off", "disabled": true }
+            ],
+            "url": {
+              "raw": "https://api.example.com/v1/users",
+              "protocol": "https",
+              "host": ["api", "example", "com"],
+              "path": ["v1", "users"],
+              "query": [
+                { "key": "page", "value": "1" },
+                { "key": "keyword", "value": "{{keyword}}" },
+                { "key": "trace", "value": "off", "disabled": true }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["console.log('准备请求用户列表');"]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('状态码为 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "response": [
+            {
+              "name": "成功",
+              "originalRequest": {
+                "method": "GET",
+                "url": { "raw": "https://api.example.com/v1/users" }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\"code\":0,\"data\":[]}"
+            }
+          ]
+        },
+        {
+          "name": "创建用户",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": {
+              "raw": "https://api.example.com/v1/users",
+              "protocol": "https",
+              "host": ["api", "example", "com"],
+              "path": ["v1", "users"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"张三\",\n  \"email\": \"zhangsan@example.com\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{authToken}}", "type": "string" }]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('返回了用户 id', function () {", "    pm.expect(pm.response.json().id).to.be.a('number');", "});"]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "临时请求",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "url": {
+          "raw": "https://api.example.com/v1/orders",
+          "protocol": "https",
+          "host": ["api", "example", "com"],
+          "path": ["v1", "orders"]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"sku\": \"A-1001\",\n  \"count\": 2\n}",
+          "options": { "raw": { "language": "json" } }
+        },
+        "auth": {
+          "type": "apikey",
+          "apikey": [
+            { "key": "key", "value": "X-Api-Key", "type": "string" },
+            { "key": "value", "value": "{{apiKey}}", "type": "string" },
+            { "key": "in", "value": "header", "type": "string" }
+          ]
+        }
+      }
+    },
+    {
+      "name": "订单模块",
+      "item": [
+        {
+          "name": "子模块",
+          "item": [
+            {
+              "name": "更新订单备注",
+              "request": {
+                "method": "PUT",
+                "header": [{ "key": "Content-Type", "value": "application/x-www-form-urlencoded" }],
+                "url": {
+                  "raw": "https://api.example.com/v1/orders/1001",
+                  "protocol": "https",
+                  "host": ["api", "example", "com"],
+                  "path": ["v1", "orders", "1001"]
+                },
+                "body": {
+                  "mode": "urlencoded",
+                  "urlencoded": [
+                    { "key": "remark", "value": "加急" },
+                    { "key": "notify", "value": "true" }
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "variable": [
+    { "key": "baseUrl", "value": "https://api.example.com" },
+    { "key": "authToken", "value": "eyJhbGciOiJIUzI1NiJ9.demo", "type": "secret" }
+  ]
+}

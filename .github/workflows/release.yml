@@ -76,6 +76,9 @@ jobs:
       - name: 单元测试
         run: npm test
 
+      - name: 伴生程序自测（native messaging 协议）
+        run: node native-host/selftest.mjs
+
       - name: 构建（UI + Service Worker + 图标）
         run: npm run build:all
 
@@ -83,6 +86,8 @@ jobs:
         run: node scripts/pack.mjs
 
       # 确认 manifest 里的版本号确实和 tag 对上了
+      # 注意：pack.mjs 会产出两个 zip（扩展本体 + 伴生程序），
+      # 所以这里要逐个列，不能用 `unzip -l release/*.zip`。
       - name: 校验版本号与产物结构
         run: |
           TAG="${{ steps.prep.outputs.tag }}"
@@ -92,7 +97,10 @@ jobs:
             echo "::error::manifest 版本号($VERIFIED)与 tag($TAG)不一致"
             exit 1
           fi
-          unzip -l release/*.zip
+          for z in release/*.zip; do
+            echo "=== $z ==="
+            unzip -l "$z"
+          done
 
       - name: 创建 GitHub Release
         env:

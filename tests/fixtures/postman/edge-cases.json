@@ -1,0 +1,131 @@
+{
+  "info": {
+    "_postman_id": "2b3c4d5e-3333-4444-8555-666677778888",
+    "name": "边界情况样例",
+    "description": "专门放一些“格式不规整但真实存在”的写法：没有 raw 的 URL、GraphQL、文件体、多个脚本事件、item 级变量。",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "没有 raw 的 URL",
+      "request": {
+        "method": "GET",
+        "url": {
+          "protocol": "https",
+          "host": ["api", "example", "com"],
+          "path": ["v1", "health"]
+        }
+      }
+    },
+    {
+      "name": "带端口的 URL",
+      "request": {
+        "method": "GET",
+        "url": {
+          "protocol": "http",
+          "host": ["127", "0", "0", "1"],
+          "port": "8080",
+          "path": ["ping"]
+        }
+      }
+    },
+    {
+      "name": "行内 query 的 URL",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "https://api.example.com/v1/search?q={{keyword}}&page=1",
+          "protocol": "https",
+          "host": ["api", "example", "com"],
+          "path": ["v1", "search"]
+        }
+      }
+    },
+    {
+      "name": "GraphQL 请求",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/graphql" }],
+        "url": { "raw": "https://api.example.com/graphql" },
+        "body": {
+          "mode": "graphql",
+          "graphql": {
+            "query": "query GetUser($id: ID!) { user(id: $id) { name } }",
+            "variables": "{\n  \"id\": \"1001\"\n}"
+          }
+        }
+      }
+    },
+    {
+      "name": "文件请求体",
+      "request": {
+        "method": "POST",
+        "url": { "raw": "https://api.example.com/v1/upload" },
+        "body": {
+          "mode": "file",
+          "file": { "src": "C:\\Users\\demo\\report.pdf", "contentType": "application/pdf" }
+        }
+      }
+    },
+    {
+      "name": "带文件字段的表单",
+      "request": {
+        "method": "POST",
+        "url": { "raw": "https://api.example.com/v1/upload/form" },
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            { "key": "title", "value": "周报", "type": "text" },
+            { "key": "attachment", "type": "file", "src": "C:\\Users\\demo\\report.pdf", "contentType": "application/pdf" }
+          ]
+        }
+      }
+    },
+    {
+      "name": "多个脚本事件",
+      "variable": [{ "key": "collectionLevelKey", "value": "collectionLevelValue" }],
+      "request": {
+        "method": "GET",
+        "url": { "raw": "https://api.example.com/v1/scripts" }
+      },
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": { "type": "text/javascript", "exec": ["console.log('第一段前置脚本');"] }
+        },
+        {
+          "listen": "prerequest",
+          "script": { "type": "text/javascript", "exec": ["console.log('第二段前置脚本');"] }
+        },
+        {
+          "listen": "test",
+          "script": { "type": "text/javascript", "exec": ["console.log('第一段测试脚本');"] }
+        },
+        {
+          "listen": "test",
+          "script": { "type": "text/javascript", "exec": ["console.log('第二段测试脚本');"] }
+        }
+      ]
+    },
+    {
+      "name": "纯文本请求体",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "text/plain" }],
+        "url": { "raw": "https://api.example.com/v1/echo" },
+        "body": {
+          "mode": "raw",
+          "raw": "这是一段纯文本",
+          "options": { "raw": { "language": "text" } }
+        }
+      }
+    },
+    {
+      "name": "不支持的请求方法",
+      "request": {
+        "method": "trace",
+        "url": { "raw": "https://api.example.com/v1/trace" }
+      }
+    }
+  ]
+}

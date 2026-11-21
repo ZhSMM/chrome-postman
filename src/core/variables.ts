@@ -33,22 +33,68 @@ export interface InterpolateResult {
 }
 
 /**
- * 内置动态变量工厂。
+ * 变量占位符的匹配规则。
+ *
+ * 【为什么要导出成常量】
+ * 变量引擎（interpolate）和变量检查器（variable-lint）必须用**同一套**规则，
+ * 否则会出现"引擎认为能解析、UI 认为没定义"这类矛盾 bug。
+ * 所以正则只在这里定义一次，其他地方引用。
+ *
+ * 规则说明：
+ * - 占位符内允许空格：{{ host }} 等价于 {{host}}
+ * - 不允许嵌套大括号：{{{a}}} 不会被匹配
+ */
+export const VARIABLE_PATTERN = /\{\{\s*([^{}]+?)\s*\}\}/g;
+
+/**
+ * 内置动态变量的描述信息。
+ *
+ * 【为什么用数组而不是原来的 Record】
+ * 补全功能需要知道每个内置变量的名字**和说明**（要显示给用户看），
+ * 原来的 `Record<string, () => string>` 只有函数，说不了明。
+ * 所以改成数组作为单一事实源，再由它生成工厂表。
+ */
+export interface BuiltinVariable {
+  /** 变量名，带 $ 前缀 */
+  name: string;
+  /** 中文说明 */
+  description: string;
+  /** 生成示例值（补全时预览给用户看） */
+  preview: () => string;
+}
+
+/**
+ * 内置动态变量清单。
  * 用函数而不是常量，因为动态变量的值必须"每次求值都不同"
  * （比如 {{$randomInt}} 每次都该给新值）。
  */
-const dynamicFactories: Record<string, () => string> = {
+export const BUILTIN_VARIABLES: BuiltinVariable[] = [
   /** Unix 时间戳（秒） */
-  $timestamp: () => String(Math.floor(Date.now() / 1000)),
+  { name: '$timestamp', description: 'Unix 时间戳（秒）', preview: () => String(Math.floor(Date.now() / 1000)) },
   /** ISO 8601 时间字符串 */
-  $isoTimestamp: () => new Date().toISOString(),
+  { name: '$isoTimestamp', description: 'ISO 8601 时间字符串', preview: () => new Date().toISOString() },
   /** UUID v4 */
-  $uuid: () => generateUuid(),
+  { name: '$uuid', description: 'UUID v4', preview: () => generateUuid() },
   /** UUID v4（Postman 老名字） */
-  $guid: () => generateUuid(),
+  { name: '$guid', description: 'UUID v4（Postman 老名字）', preview: () => generateUuid() },
   /** 0~1000 的随机整数 */
-  $randomInt: () => String(Math.floor(Math.random() * 1001)),
-};
+  { name: '$randomInt', description: '0~1000 的随机整数', preview: () => String(Math.floor(Math.random() * 1001)) },
+];
+
+/** 变量名 → 取值函数 */
+const dynamicFactories: Record<string, () => string> = Object.fromEntries(
+  BUILTIN_VARIABLES.map((item) => [item.name, item.preview]),
+);
+
+/**
+ * 判断一个变量名是否是内置动态变量。
+ *
+ * 为什么单独提供这个函数：UI 的补全列表和变量检查器都需要
+ * 判断"这个名字是不是内置变量"，但 dynamicFactories 是私有的。
+ */
+export function hasBuiltinVariable(name: string): boolean {
+  return Object.prototype.hasOwnProperty.call(dynamicFactories, name.trim());
+}
 
 /** 生成 UUID v4（优先用浏览器原生 API） */
 export function generateUuid(): string {
@@ -97,7 +143,9 @@ export function interpolate(input: string, scope: VariableScope): InterpolateRes
   if (!input || input.indexOf('{{') === -1) return { text: input ?? '', missing: [] };
 
   const missing: string[] = [];
-  const text = input.replace(/\{\{\s*([^{}]+?)\s*\}\}/g, (match, rawName: string) => {
+  // 用共享的 VARIABLE_PATTERN，但这里需要独立的 lastIndex 状态，
+  // 所以用 String.replace 传入一个全新的正则实例（replace 内部会重置 lastIndex）。
+  const text = input.replace(new RegExp(VARIABLE_PATTERN.source, 'g'), (match, rawName: string) => {
     const name = rawName.trim();
     const value = lookupVariable(name, scope);
     if (value === undefined) {

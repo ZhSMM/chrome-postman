@@ -1,0 +1,12 @@
+{
+  "id": "9e8d7c6b-4444-4555-8666-777788889999",
+  "name": "开发环境",
+  "values": [
+    { "key": "baseUrl", "value": "https://api.dev.example.com", "type": "default", "enabled": true },
+    { "key": "authToken", "value": "dev-token-123", "type": "secret", "enabled": true },
+    { "key": "keyword", "value": "postman", "type": "default", "enabled": true },
+    { "key": "oldApiKey", "value": "deprecated", "type": "default", "enabled": false }
+  ],
+  "_postman_variable_scope": "environment",
+  "_postman_exported_using": "Postman/11.0.0"
+}

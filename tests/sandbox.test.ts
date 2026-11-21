@@ -133,7 +133,7 @@ describe('sandbox / pm SDK', () => {
     expect(out.logs[0].message).toContain('123');
   });
 
-  it('脚本抛错时返回错误信息而不是抛出异常', async () => {
+  it('脚本抛错时返回结构化错误信息而不是抛出异常', async () => {
     const out = await runSandbox({
       script: `throw new Error('boom');`,
       phase: 'pre',
@@ -141,7 +141,12 @@ describe('sandbox / pm SDK', () => {
       scope: makeScope(),
     });
 
-    expect(out.error).toContain('boom');
+    // v1.2 起 error 从字符串升级为结构化对象（为了标红出错行）
+    expect(out.error?.message).toContain('boom');
+    expect(out.error?.name).toBe('Error');
+    // 行列号来自 QuickJS 的堆栈，基准与编辑器里的行号一致
+    expect(out.error?.location?.line).toBe(1);
+    expect(out.error?.location?.phase).toBe('pre');
   });
 
   it('死循环会被超时中断', async () => {

@@ -124,6 +124,15 @@ export interface HttpRequest {
   folderId?: string | null;
   /** 绑定的环境 id，undefined 表示跟随全局激活环境 */
   environmentId?: string | null;
+  /**
+   * 单请求级的 SSL 模式覆盖。
+   * 不填（undefined）表示跟随全局设置。
+   *
+   * 【为什么单独留一个字段而不是改全局设置】
+   * 大多数接口是正常签发的，只有个别内网服务是自签名证书。
+   * 为了一个请求去改全局设置太粗放，改完还得改回来。
+   */
+  sslMode?: SslMode;
   createdAt: number;
   updatedAt: number;
 }
@@ -160,6 +169,21 @@ export interface Environment {
   updatedAt: number;
 }
 
+/**
+ * SSL 校验模式。
+ *
+ * 【为什么分三种而不是一个开关】
+ * 浏览器**没有**"关闭证书校验"这个能力 —— 校验发生在 Chromium 网络栈的
+ * net::CertVerifier 层，扩展的 JS 根本碰不到。所以能做选择的只有"谁来发这个请求"：
+ *
+ * - strict       浏览器原生 fetch，浏览器按系统信任库校验（最安全，默认）
+ * - system-trust 行为上与 strict 完全相同（浏览器本来就信任系统信任库），
+ *                单独列出来是为了在 UI 上表达"我已经把 CA 装进系统了"这个用户意图
+ * - native-bridge 交给本机伴生程序发（Node 的 https 模块有 rejectUnauthorized 选项，
+ *                浏览器没有），这是唯一能真正跳过校验的路径
+ */
+export type SslMode = 'strict' | 'system-trust' | 'native-bridge';
+
 /** 全局设置 */
 export interface Settings {
   /** 主题 */
@@ -174,6 +198,34 @@ export interface Settings {
   historyLimit: number;
   /** 代理地址（仅用于诊断提示，填写后报错信息会附带代理相关的排查建议） */
   proxyHint?: string;
+  /** 全局 SSL 模式 */
+  sslMode: SslMode;
+  /**
+   * 是否允许跳过证书校验（高危）。
+   *
+   * 【为什么默认关、且必须配桥接程序才生效】
+   * 跳过校验意味着你的请求可能被中间人截获 —— 账号密码、token 全都会裸奔。
+   * 而且这个开关**只在 native-bridge 模式下有效**：浏览器自己发的请求无法跳过校验。
+   */
+  allowInsecureTls: boolean;
+}
+
+/**
+ * 本地桥接程序（伴生程序）的就绪状态。
+ *
+ * 【为什么不放 Settings 里】
+ * 这是运行时探测出来的状态，不是用户配置，而且用户装/卸载伴生程序后它会变。
+ * 放 Settings 就会和真实状态对不上。应该放运行态（store），不落盘。
+ */
+export interface BridgeStatus {
+  /** 是否可用（伴生程序能连上并完成 ping） */
+  available: boolean;
+  /** 伴生程序版本 */
+  version?: string;
+  /** 探测失败时的错误信息 */
+  error?: string;
+  /** 上次探测时间 */
+  checkedAt: number;
 }
 
 /** 某个网络错误码的解释 */
@@ -218,6 +270,35 @@ export interface VariableScope {
 }
 
 /**
+ * 请求的分段耗时。
+ *
+ * 【精度说明】
+ * 这是 webRequest 能给到的最大精度 —— 三段。
+ * DNS / TCP / TLS 的更细分段在 DevTools 协议里，扩展 API 拿不到
+ * （详见 docs/DESIGN-v1.2.md §4.2）。
+ */
+export interface RequestTiming {
+  phases: {
+    /** 建立连接：DNS + TCP + TLS + 代理 CONNECT 的合计耗时 */
+    connect: number;
+    /** 服务端处理 + 网络往返 */
+    waiting: number;
+    /** 响应体下载 */
+    download: number;
+  };
+  /** 总耗时 */
+  total: number;
+  /** 实际连接到的服务器 IP */
+  serverIp?: string;
+  /** 是否命中缓存 */
+  fromCache: boolean;
+  /** 发生了几次重定向 */
+  redirects: number;
+  /** 数据来源：webRequest = 有分段；local = 只有总耗时 */
+  source: 'webRequest' | 'local';
+}
+
+/**
  * 插值之后的"可直接发送"的请求。
  * 注意：这里的每个字段都已经把 {{var}} 替换成了真实值。
  */
@@ -253,6 +334,14 @@ export interface HttpResponseData {
   responseTime: number;
   /** 最终 URL（跟随重定向后） */
   finalUrl?: string;
+  /**
+   * 本次响应是否**未经证书校验**。
+   *
+   * 【为什么必须显式标出来】
+   * 跳过了证书校验，就意味着这个响应可能来自中间人。UI 必须用醒目横幅告诉用户，
+   * 否则用户会以为这是一个可信的响应。
+   */
+  insecure?: boolean;
 }
 
 /** 单条断言结果 */
@@ -262,6 +351,40 @@ export interface TestResult {
   error?: string;
   /** 断言耗时 */
   duration?: number;
+}
+
+/** 脚本执行阶段：前置（请求发出前）/ 后置（响应回来后） */
+export type ScriptPhase = 'pre' | 'post';
+
+/**
+ * 错误在脚本里的位置。
+ * 行列号都是 1-based，和编辑器里显示的行号一致。
+ */
+export interface ScriptErrorLocation {
+  /** 行号，从 1 开始 */
+  line: number;
+  /** 列号，从 1 开始 */
+  column: number;
+  /** 出错的是哪个阶段的脚本 */
+  phase: ScriptPhase;
+}
+
+/**
+ * 结构化的脚本错误。
+ *
+ * 【为什么要结构化而不是一个字符串】
+ * 字符串里混着类型名、消息、堆栈，UI 想"标红出错的那一行"就必须解析字符串。
+ * 结构化之后，位置信息是明确字段，UI 直接用，不用猜。
+ */
+export interface ScriptError {
+  /** 错误类型名，如 ReferenceError / TypeError / SyntaxError */
+  name: string;
+  /** 错误消息 */
+  message: string;
+  /** 原始堆栈（保留原文，方便排查） */
+  stack?: string;
+  /** 解析出的位置；解析不出来（超时中断等）时为 undefined */
+  location?: ScriptErrorLocation;
 }
 
 /** 脚本日志 */
@@ -287,8 +410,13 @@ export interface ScriptOutcome {
   tests: TestResult[];
   /** 控制台日志 */
   logs: LogEntry[];
-  /** 脚本整体抛错时的信息 */
-  error?: string;
+  /**
+   * 脚本整体抛错时的信息（结构化，含行列号）。
+   *
+   * 【注意】v1.2 之前这里是 string，现在是 ScriptError。
+   * 改成结构化是为了让 UI 能标红出错行并支持点击跳转。
+   */
+  error?: ScriptError;
 }
 
 /** 一次请求执行的完整结果 */
@@ -303,6 +431,25 @@ export interface ExecutionResult {
   totalTime: number;
   /** 失败时的网络诊断报告（仅在请求失败时出现） */
   diagnostic?: DiagnosticReport;
+  /**
+   * 分段耗时。
+   * 只有开启了「网络诊断」（webRequest 权限）才会有 source='webRequest' 的分段数据；
+   * 否则只有本地测的总耗时（source='local'）。
+   */
+  timing?: RequestTiming;
+  /**
+   * 本次请求是否跳过了证书校验。
+   * 为 true 时 UI 必须显示醒目横幅（见 ResponsePanel）。
+   */
+  insecure?: boolean;
+  /**
+   * SSL 相关的提示文案（例如"桥接程序未就绪，本次已按严格校验发送"）。
+   *
+   * 【为什么要有这个字段】
+   * 设计原则是「绝不静默降级」。用户以为自己开了跳过校验，但实际没有，
+   * UI 必须把这件事说出来，而不是让用户面对一句毫无线索的 "Failed to fetch"。
+   */
+  sslNotice?: string;
 }
 
 /** 历史记录条目 */
@@ -317,6 +464,8 @@ export interface HistoryItem {
   timestamp: number;
   /** 来自哪个集合 */
   collectionId?: string;
+  /** 这次请求是否跳过了证书校验（历史里要留个记号，方便回溯风险） */
+  insecure?: boolean;
 }
 
 /** 消息协议：UI → Service Worker */
@@ -350,6 +499,10 @@ export const DEFAULT_SETTINGS: Settings = {
   followRedirects: true,
   sendCookies: true,
   historyLimit: 200,
+  // 默认走浏览器原生通道 + 严格校验，这是最安全的组合
+  sslMode: 'strict',
+  // 跳过校验是高危操作，必须由用户显式打开
+  allowInsecureTls: false,
 };
 
 /** 空的请求体 */

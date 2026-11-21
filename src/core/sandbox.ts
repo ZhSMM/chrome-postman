@@ -32,7 +32,8 @@
 import { newQuickJSWASMModuleFromVariant } from 'quickjs-emscripten';
 import { RELEASE_SYNC } from 'quickjs-emscripten/variants';
 import pmSdkSource from './pm-sdk.raw.js?raw';
-import type { LogEntry, TestResult } from '../shared/types';
+import type { LogEntry, ScriptError, ScriptPhase, TestResult } from '../shared/types';
+import { buildScriptError } from './script-error';
 
 /** 注入沙箱的请求状态（与 UI 的 HttpRequest 解耦，便于单测） */
 export interface SandboxRequestState {
@@ -90,8 +91,11 @@ export interface SandboxOutput {
   tests: TestResult[];
   /** 日志 */
   logs: LogEntry[];
-  /** 脚本整体抛错时的信息 */
-  error?: string;
+  /**
+   * 脚本整体抛错时的信息（结构化，含行列号）。
+   * 用结构化而不是字符串，是为了让 UI 能标红出错行并支持点击跳转。
+   */
+  error?: ScriptError;
 }
 
 /** 内存上限：32 MB。够用，又不至于让恶意脚本把内存吃光。 */
@@ -160,7 +164,7 @@ export async function runSandbox(input: SandboxInput): Promise<SandboxOutput> {
     const stateJson = JSON.stringify(state);
     const injectResult = context.evalCode(`globalThis.__state = ${stateJson};`);
     if (injectResult.error) {
-      output.error = describeError(context, injectResult.error);
+      output.error = describeError(context, injectResult.error, input.phase);
       injectResult.error.dispose();
       return output;
     }
@@ -169,7 +173,7 @@ export async function runSandbox(input: SandboxInput): Promise<SandboxOutput> {
     // --- 装入 pm SDK ---
     const sdkResult = context.evalCode(pmSdkSource, 'pm-sdk.js');
     if (sdkResult.error) {
-      output.error = describeError(context, sdkResult.error);
+      output.error = describeError(context, sdkResult.error, input.phase);
       sdkResult.error.dispose();
       return output;
     }
@@ -178,7 +182,7 @@ export async function runSandbox(input: SandboxInput): Promise<SandboxOutput> {
     // --- 执行用户脚本 ---
     const scriptResult = context.evalCode(input.script, `user-${input.phase}-script.js`);
     if (scriptResult.error) {
-      output.error = describeError(context, scriptResult.error);
+      output.error = describeError(context, scriptResult.error, input.phase);
       scriptResult.error.dispose();
     } else {
       scriptResult.value.dispose();
@@ -200,7 +204,12 @@ export async function runSandbox(input: SandboxInput): Promise<SandboxOutput> {
       if (Array.isArray(d.logs)) output.logs = d.logs;
     }
   } catch (err) {
-    output.error = err instanceof Error ? err.message : String(err);
+    // 这里捕获的是宿主侧的异常（比如 WASM 内存超限），不是用户脚本的语法错误，
+    // 所以没有行列号 —— buildScriptError 会把 location 留空，UI 只显示文字。
+    output.error = buildScriptError(
+      { name: err instanceof Error ? err.name : 'Error', message: err instanceof Error ? err.message : String(err) },
+      input.phase,
+    );
   } finally {
     // 无论成功失败都要释放上下文，否则 WASM 堆会一直涨
     if (context) {
@@ -246,21 +255,27 @@ function applyLimits(context: any, timeoutMs: number): void {
 }
 
 /**
- * 把 QuickJS 的错误句柄转成可读字符串。
+ * 把 QuickJS 的错误句柄转成结构化的 ScriptError。
  * 注意：错误句柄用完必须 dispose，否则句柄表会泄漏。
+ *
+ * @param phase 脚本阶段，用来给堆栈里的文件名兜底
  */
-function describeError(context: any, errorHandle: any): string {
+function describeError(context: any, errorHandle: any, phase: ScriptPhase): ScriptError {
   try {
     const dumped = context.dump(errorHandle);
     if (dumped && typeof dumped === 'object') {
       const e = dumped as any;
-      const name = e.name || 'Error';
-      const message = e.message || '';
-      const stack = e.stack ? `\n${String(e.stack).trim()}` : '';
-      return `${name}: ${message}${stack}`;
+      return buildScriptError(
+        {
+          name: e.name || 'Error',
+          message: e.message || '',
+          stack: e.stack ? String(e.stack) : undefined,
+        },
+        phase,
+      );
     }
-    return String(dumped);
+    return buildScriptError({ name: 'Error', message: String(dumped) }, phase);
   } catch {
-    return '脚本执行失败（无法读取错误信息）';
+    return buildScriptError({ name: 'Error', message: '脚本执行失败（无法读取错误信息）' }, phase);
   }
 }

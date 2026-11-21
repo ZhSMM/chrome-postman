@@ -388,6 +388,22 @@ select.select {
   flex: 0 0 auto;
 }
 
+/*
+ * URL 输入框 + 变量提示的容器。
+ *
+ * 【为什么要单独包一层】
+ * 变量提示条要显示在 URL 框正下方，所以这两个元素要组成一个纵向的组。
+ * min-width: 0 是关键 —— flex 子项默认 min-width:auto，
+ * 不加的话长 URL 会把整行撑破，提示条被挤出可视区域。
+ */
+.url-field {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
 .method-select {
   width: 104px;
   font-weight: 600;
@@ -768,4 +784,332 @@ pre.code {
 .perm-state.on {
   background: color-mix(in srgb, var(--green) 20%, transparent);
   color: var(--green);
+}
+
+/* ---------------- v1.2：耗时面板 ---------------- */
+
+.timing {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 4px 0;
+}
+
+.timing-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+}
+
+.timing-label {
+  flex: 0 0 64px;
+  color: var(--text-dim);
+}
+
+/* 进度条轨道 */
+.timing-track {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 8px;
+  border-radius: 4px;
+  background: var(--bg-hover);
+  overflow: hidden;
+}
+
+.timing-fill {
+  height: 100%;
+  border-radius: 4px;
+  background: linear-gradient(90deg, var(--blue), var(--green));
+  transition: width 0.25s ease;
+}
+
+.timing-value {
+  flex: 0 0 auto;
+  min-width: 56px;
+  text-align: right;
+  color: var(--text);
+}
+
+/* ---------------- v1.2：智能补全 ---------------- */
+
+/*
+ * 智能输入框的容器。
+ * position:relative 是浮层定位的前提 —— 候选列表绝对定位在它内部，
+ * 这样不用手算坐标，输入框滚动/换行时也不会错位。
+ */
+.smart-input {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+}
+
+.smart-input > input {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: 100%;
+}
+
+/* 候选浮层 */
+.completion-popup {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 60;
+  max-height: 260px;
+  overflow-y: auto;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+  padding: 3px;
+}
+
+/* 单个候选项 */
+.completion-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.completion-item.active {
+  background: var(--bg-hover);
+}
+
+/* 类别图标 */
+.completion-kind {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 3px;
+  font-family: var(--mono);
+  font-size: 10px;
+  background: var(--bg-hover);
+  color: var(--text-dim);
+}
+
+.completion-kind.variable {
+  background: color-mix(in srgb, var(--blue) 20%, transparent);
+  color: var(--blue);
+}
+
+.completion-kind.builtin {
+  background: color-mix(in srgb, var(--purple, #a78bfa) 20%, transparent);
+  color: var(--purple, #a78bfa);
+}
+
+.completion-kind.function {
+  background: color-mix(in srgb, var(--green) 20%, transparent);
+  color: var(--green);
+}
+
+.completion-kind.header {
+  background: color-mix(in srgb, var(--yellow) 20%, transparent);
+  color: var(--yellow);
+}
+
+/* 候选文字 */
+.completion-label {
+  font-family: var(--mono);
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.completion-detail {
+  margin-left: auto;
+  color: var(--text-dim);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 55%;
+  padding-left: 12px;
+}
+
+/* ---------------- v1.2：变量缺失提示 ---------------- */
+
+.var-hints {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.var-hints-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.var-hints-warn {
+  color: var(--yellow);
+}
+
+/* 变量名小标签 */
+.var-chip {
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 9px;
+  border: 1px solid color-mix(in srgb, var(--red) 45%, transparent);
+  background: color-mix(in srgb, var(--red) 14%, transparent);
+  color: var(--red);
+  cursor: pointer;
+}
+
+.var-chip:hover,
+.var-chip.active {
+  background: color-mix(in srgb, var(--red) 26%, transparent);
+}
+
+/* 候选变量（可替换的） */
+.var-chip.ok {
+  border-color: color-mix(in srgb, var(--green) 45%, transparent);
+  background: color-mix(in srgb, var(--green) 14%, transparent);
+  color: var(--green);
+}
+
+.var-chip.ok:hover {
+  background: color-mix(in srgb, var(--green) 26%, transparent);
+}
+
+/* 只展示、不可点击的变量 */
+.var-chip.static {
+  border-color: var(--border);
+  background: var(--bg-hover);
+  color: var(--text-dim);
+  cursor: default;
+}
+
+/* ---------------- v1.2：脚本错误 ---------------- */
+
+/* 永远可见的错误提示条 */
+.script-error-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: color-mix(in srgb, var(--red) 12%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--red) 30%, transparent);
+  font-size: 12px;
+}
+
+.script-error-msg {
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Console 里的错误详情 */
+.script-error-detail {
+  margin-bottom: 10px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--red) 30%, transparent);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--red) 8%, transparent);
+}
+
+.script-error-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+
+.script-error-stack {
+  margin-top: 8px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+}
+
+/* ---------------- v1.2：证书校验 / SSL ---------------- */
+
+/*
+ * 未校验证书的警告条。
+ * 为什么用黄色而不是红色：红色在面板里已经代表"请求失败了"，
+ * 但这种情况请求其实是成功的 —— 它只是不安全，所以用警告色更准确。
+ */
+.insecure-bar {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 7px 12px;
+  background: color-mix(in srgb, var(--yellow) 14%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--yellow) 34%, transparent);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.insecure-msg {
+  color: var(--text);
+  flex: 1;
+}
+
+/* 可复制的命令块 */
+.cmd-block {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.7;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  word-break: break-all;
+  overflow-x: auto;
+}
+
+/* 证书体检结果 */
+.cert-box {
+  margin-top: 8px;
+  padding: 8px 10px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 12px;
+}
+
+.cert-row {
+  display: flex;
+  gap: 10px;
+  padding: 3px 0;
+  line-height: 1.6;
+}
+
+.cert-label {
+  flex: 0 0 52px;
+  color: var(--text-faint);
+}
+
+/* 替代方案列表 */
+.alt-list {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.8;
+  color: var(--text-dim);
+}
+
+.alt-list li {
+  margin-bottom: 6px;
+}
+
+.alt-list b {
+  color: var(--text);
 }

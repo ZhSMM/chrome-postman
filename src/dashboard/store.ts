@@ -11,10 +11,12 @@
  *   - 运行数据（当前请求/响应/历史）：内存态，刷新即丢（历史另有 IndexedDB 兜底）
  */
 import { create } from 'zustand';
+import { MSG } from '../shared/messages';
 import {
   DEFAULT_SETTINGS,
   emptyAuth,
   emptyBody,
+  type BridgeStatus,
   type Collection,
   type DiagnosticReport,
   type Environment,
@@ -23,7 +25,9 @@ import {
   type HistoryItem,
   type HttpRequest,
   type KeyValue,
+  type RequestTiming,
   type ScriptOutcome,
+  type ScriptPhase,
   type Settings,
 } from '../shared/types';
 import {
@@ -54,6 +58,23 @@ export interface Toast {
   message: string;
   kind: 'info' | 'error' | 'success';
 }
+
+/** 脚本错误跳转请求 */
+export interface ScriptFocusRequest {
+  /** 要跳到哪个阶段的脚本 */
+  phase: ScriptPhase;
+  /** 目标行号（1-based） */
+  line: number;
+  /**
+   * 自增令牌。
+   * 为什么需要它：只传 line 的话，"连续两次跳到同一行"React 会认为
+   * 依赖没变而不触发 effect。加上一个每次都变的 token 就没这个问题了。
+   */
+  token: number;
+}
+
+/** 自增计数器：保证每次跳转的 token 都不重复（Date.now() 可能撞毫秒） */
+let focusToken = 0;
 
 /** 创建一个空白请求草稿 */
 export function createEmptyRequest(): HttpRequest {
@@ -92,6 +113,23 @@ interface AppState {
   outcome: ScriptOutcome | null;
   /** 最近一次失败的网络诊断报告 */
   diagnostic: DiagnosticReport | null;
+  /** 最近一次请求的分段耗时 */
+  timing: RequestTiming | null;
+  /**
+   * 最近一次响应是否跳过了证书校验。
+   * 为 true 时响应面板要显示醒目横幅 —— 未校验的响应可能来自中间人。
+   */
+  insecure: boolean;
+  /**
+   * SSL 降级提示。
+   * 【为什么必须有它】用户以为开了跳过校验、实际没开时，必须明确告知，
+   * 绝不能静默退回严格校验然后只报一句 "Failed to fetch"。
+   */
+  sslNotice: string | null;
+  /** 本地桥接程序（伴生程序）的就绪状态 */
+  bridgeStatus: BridgeStatus | null;
+  /** 脚本错误的跳转请求（点击 Console 里的错误时设置） */
+  scriptFocus: ScriptFocusRequest | null;
   sending: boolean;
   history: HistoryItem[];
   toasts: Toast[];
@@ -129,6 +167,10 @@ interface AppState {
   dismissToast: (id: string) => void;
   setSidebarView: (view: 'collections' | 'history') => void;
   updateSettings: (patch: Partial<Settings>) => Promise<void>;
+  /** 探测本地桥接程序是否就绪 */
+  probeBridge: () => Promise<void>;
+  /** 跳到脚本的某一行（会切到对应的前置/后置标签页） */
+  focusScriptError: (phase: ScriptPhase, line: number) => void;
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -145,6 +187,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   response: null,
   outcome: null,
   diagnostic: null,
+  timing: null,
+  insecure: false,
+  sslNotice: null,
+  bridgeStatus: null,
+  scriptFocus: null,
   sending: false,
   history: [],
   toasts: [],
@@ -304,11 +351,34 @@ export const useAppStore = create<AppState>((set, get) => ({
   async send() {
     const { currentRequest, sending } = get();
     if (sending) return;
-    set({ sending: true, response: null, outcome: null, diagnostic: null });
+    set({
+      sending: true,
+      response: null,
+      outcome: null,
+      diagnostic: null,
+      timing: null,
+      insecure: false,
+      sslNotice: null,
+    });
 
     try {
       const result = await sendRequestToWorker(currentRequest);
-      set({ response: result.response, outcome: result.outcome, diagnostic: result.diagnostic ?? null });
+      set({
+        response: result.response,
+        outcome: result.outcome,
+        diagnostic: result.diagnostic ?? null,
+        timing: result.timing ?? null,
+        insecure: result.insecure ?? false,
+        sslNotice: result.sslNotice ?? null,
+      });
+      /*
+       * 【为什么要单独弹一次】
+       * 降级提示（sslNotice）说明"用户以为的配置"和"实际做的事"不一致。
+       * 这种事必须让用户当场看到，不能只躺在面板角落里等人去找。
+       */
+      if (result.sslNotice) {
+        get().pushToast(result.sslNotice, 'error');
+      }
       if (result.error) {
         get().pushToast(result.error, 'error');
       } else {
@@ -389,8 +459,48 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   async updateSettings(patch) {
     const settings = { ...get().settings, ...patch };
+    /*
+     * 【为什么在这里强制这个约束】
+     * 「跳过证书校验」只有在「本地桥接」模式下才有意义 ——
+     * 浏览器自己发的请求不可能跳过校验。
+     * 所以切走模式时顺手把开关关掉，
+     * 避免界面上留一个"看着开着却不生效"的假开关。
+     */
+    if (settings.sslMode !== 'native-bridge' && settings.allowInsecureTls) {
+      settings.allowInsecureTls = false;
+    }
     await saveSettings(settings);
     set({ settings });
+  },
+
+  /** 探测本地桥接程序是否就绪 */
+  async probeBridge() {
+    try {
+      const response = await chrome.runtime.sendMessage({ type: MSG.PROBE_BRIDGE });
+      const status = response?.payload;
+      set({
+        bridgeStatus: {
+          available: Boolean(status?.available),
+          version: status?.version,
+          error: status?.error,
+          checkedAt: Date.now(),
+        },
+      });
+    } catch (err) {
+      set({
+        bridgeStatus: {
+          available: false,
+          error: (err as Error)?.message ?? '探测失败',
+          checkedAt: Date.now(),
+        },
+      });
+    }
+  },
+
+  /** 跳到脚本的某一行 */
+  focusScriptError(phase, line) {
+    focusToken += 1;
+    set({ scriptFocus: { phase, line, token: focusToken } });
   },
 }));
 

@@ -1,15 +1,24 @@
 /**
- * 响应面板：状态栏 + Body / Headers / Tests / Console 四个视图。
+ * 响应面板：状态栏 + Body / Headers / Tests / Console / 诊断 五个视图。
  */
 import { useMemo, useState } from 'react';
-import type { DiagnosticReport, ExecutionResult, ScriptOutcome } from '../../shared/types';
+import type { DiagnosticReport, ExecutionResult, RequestTiming, ScriptOutcome, ScriptPhase } from '../../shared/types';
 import { formatBytes, formatMs } from '../../shared/utils';
+import TimingPanel from './TimingPanel';
 
 interface Props {
   response: ExecutionResult['response'];
   outcome: ScriptOutcome | null;
   /** 最近一次失败的网络诊断报告 */
   diagnostic?: DiagnosticReport | null;
+  /** 分段耗时 */
+  timing?: RequestTiming | null;
+  /** 本次响应是否跳过了证书校验 */
+  insecure?: boolean;
+  /** SSL 降级提示（例如"桥接未就绪，本次已按严格校验发送"） */
+  sslNotice?: string | null;
+  /** 点击脚本错误时跳到对应行 */
+  onFocusScriptError?: (phase: ScriptPhase, line: number) => void;
 }
 
 /** 把 JSON 美化输出；不是合法 JSON 就原样返回 */
@@ -21,8 +30,18 @@ function prettify(text: string): string {
   }
 }
 
-export default function ResponsePanel({ response, outcome, diagnostic }: Props) {
-  const [tab, setTab] = useState<'body' | 'headers' | 'tests' | 'console' | 'diagnostic'>('body');
+export default function ResponsePanel({
+  response,
+  outcome,
+  diagnostic,
+  timing,
+  insecure,
+  sslNotice,
+  onFocusScriptError,
+}: Props) {
+  const [tab, setTab] = useState<'body' | 'headers' | 'tests' | 'console' | 'timing' | 'diagnostic'>(
+    'body',
+  );
   const [pretty, setPretty] = useState(true);
 
   const isJson = useMemo(() => {
@@ -39,6 +58,9 @@ export default function ResponsePanel({ response, outcome, diagnostic }: Props) 
   const tests = outcome?.tests ?? [];
   const logs = outcome?.logs ?? [];
   const failed = tests.filter((t) => !t.passed).length;
+
+  /** 最近一次脚本错误（结构化，带行列号） */
+  const scriptError = outcome?.error;
 
   return (
     <div className="response-area">
@@ -75,6 +97,63 @@ export default function ResponsePanel({ response, outcome, diagnostic }: Props) 
         )}
       </div>
 
+      {/*
+        证书校验横幅。
+        为什么必须这么醒目：
+        跳过了证书校验，就意味着这个响应可能来自中间人 ——
+        你的 token、密码在传输途中是裸奔的。
+        如果只用一行灰色小字，用户根本不会注意到，
+        那这个"跳过校验"就等于给了用户一个假的安全感。
+      */}
+      {insecure && (
+        <div className="insecure-bar">
+          <span className="status-badge warn">⚠ 未校验证书</span>
+          <span className="insecure-msg">
+            此响应的服务器证书<b>未经校验</b>，可能来自中间人。请勿在此通道中传输敏感数据。
+          </span>
+        </div>
+      )}
+
+      {/*
+        SSL 降级提示。
+        用户以为开了"跳过证书校验"，实际没开 —— 必须说出来。
+      */}
+      {sslNotice && (
+        <div className="insecure-bar">
+          <span className="status-badge warn">提示</span>
+          <span className="insecure-msg">{sslNotice}</span>
+        </div>
+      )}
+
+      {/*
+        脚本错误提示条。
+        为什么放在标签页上面而不是只在 Console 里：
+        用户发完请求最常看的是响应体，如果脚本写错了却没有任何提示，
+        用户会以为"响应正常"，直到某天断言莫名其妙不通过。
+        所以把它放在一个永远可见的位置。
+      */}
+      {scriptError && (
+        <div className="script-error-bar">
+          <span className="status-badge err">{scriptError.name}</span>
+          <span className="script-error-msg">{scriptError.message}</span>
+          {scriptError.location && (
+            <button
+              className="btn sm ghost"
+              title="跳到出错的代码行"
+              onClick={() =>
+                onFocusScriptError?.(scriptError.location!.phase, scriptError.location!.line)
+              }
+            >
+              第 {scriptError.location.line} 行 →
+            </button>
+          )}
+          <span className="spacer" />
+          <button className="btn ghost sm" onClick={() => setTab('console')}>
+            详情
+          </button>
+        </div>
+      )}
+
       <div className="tabs">
         <button className={`tab ${tab === 'body' ? 'active' : ''}`} onClick={() => setTab('body')}>
           Body
@@ -93,7 +172,13 @@ export default function ResponsePanel({ response, outcome, diagnostic }: Props) 
         </button>
         <button className={`tab ${tab === 'console' ? 'active' : ''}`} onClick={() => setTab('console')}>
           Console
-          {!!logs.length && <span className="tab-badge">{logs.length}</span>}
+          {scriptError ? (
+            <span className="tab-badge" style={{ color: 'var(--red)' }}>
+              !
+            </span>
+          ) : (
+            !!logs.length && <span className="tab-badge">{logs.length}</span>
+          )}
         </button>
         {diagnostic && (
           <button
@@ -103,6 +188,11 @@ export default function ResponsePanel({ response, outcome, diagnostic }: Props) 
           >
             诊断
             {diagnostic.netError && <span className="tab-badge">!</span>}
+          </button>
+        )}
+        {timing && (
+          <button className={`tab ${tab === 'timing' ? 'active' : ''}`} onClick={() => setTab('timing')}>
+            耗时
           </button>
         )}
       </div>
@@ -158,39 +248,69 @@ export default function ResponsePanel({ response, outcome, diagnostic }: Props) 
             </div>
           ))}
 
-        {tab === 'console' &&
-          (logs.length ? (
-            <div>
-              {logs.map((log, index) => (
-                <div key={index} className="test-item">
-                  <span
-                    className="test-icon"
-                    style={{
-                      background:
-                        log.level === 'error'
-                          ? 'color-mix(in srgb, var(--red) 22%, transparent)'
-                          : log.level === 'warn'
-                            ? 'color-mix(in srgb, var(--yellow) 22%, transparent)'
-                            : 'var(--bg-hover)',
-                      color:
-                        log.level === 'error'
-                          ? 'var(--red)'
-                          : log.level === 'warn'
-                            ? 'var(--yellow)'
-                            : 'var(--text-dim)',
-                    }}
-                  >
-                    {log.level === 'error' ? '!' : log.level === 'warn' ? '⚠' : 'i'}
-                  </span>
-                  <div className="mono" style={{ flex: 1, whiteSpace: 'pre-wrap' }}>
-                    {log.message}
-                  </div>
+        {tab === 'console' && (
+          <div>
+            {/* 脚本错误详情：带完整堆栈和跳转入口 */}
+            {scriptError && (
+              <div className="script-error-detail">
+                <div className="script-error-head">
+                  <span className="status-badge err">{scriptError.name}</span>
+                  <span>{scriptError.message}</span>
+                  {scriptError.location && (
+                    <button
+                      className="btn sm"
+                      onClick={() =>
+                        onFocusScriptError?.(scriptError.location!.phase, scriptError.location!.line)
+                      }
+                    >
+                      跳到第 {scriptError.location.line} 行
+                    </button>
+                  )}
                 </div>
-              ))}
-            </div>
-          ) : (
-            <div className="empty-state">脚本里用 console.log(...) 打印的内容会出现在这里</div>
-          ))}
+                {scriptError.stack && (
+                  <pre className="code script-error-stack">{scriptError.stack.trim()}</pre>
+                )}
+              </div>
+            )}
+
+            {logs.length ? (
+              <div>
+                {logs.map((log, index) => (
+                  <div key={index} className="test-item">
+                    <span
+                      className="test-icon"
+                      style={{
+                        background:
+                          log.level === 'error'
+                            ? 'color-mix(in srgb, var(--red) 22%, transparent)'
+                            : log.level === 'warn'
+                              ? 'color-mix(in srgb, var(--yellow) 22%, transparent)'
+                              : 'var(--bg-hover)',
+                        color:
+                          log.level === 'error'
+                            ? 'var(--red)'
+                            : log.level === 'warn'
+                              ? 'var(--yellow)'
+                              : 'var(--text-dim)',
+                      }}
+                    >
+                      {log.level === 'error' ? '!' : log.level === 'warn' ? '⚠' : 'i'}
+                    </span>
+                    <div className="mono" style={{ flex: 1, whiteSpace: 'pre-wrap' }}>
+                      {log.message}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              !scriptError && (
+                <div className="empty-state">脚本里用 console.log(...) 打印的内容会出现在这里</div>
+              )
+            )}
+          </div>
+        )}
+
+        {tab === 'timing' && <TimingPanel timing={timing} />}
 
         {tab === 'diagnostic' && diagnostic && (
           <div className="diagnostic">

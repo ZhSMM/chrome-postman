@@ -13,13 +13,18 @@ import CodeMirror from '@uiw/react-codemirror';
 import { json } from '@codemirror/lang-json';
 import { xml } from '@codemirror/lang-xml';
 import { html } from '@codemirror/lang-html';
+import { autocompletion } from '@codemirror/autocomplete';
 import type { BodyConfig, BodyMode, MultipartPart } from '../../shared/types';
+import type { CompletionSources } from '../../core/completion';
 import { uid } from '../../shared/utils';
 import KeyValueTable from './KeyValueTable';
+import { useCodemirrorCompletion } from '../codemirror-completion';
 
 interface Props {
   value: BodyConfig;
   onChange: (next: BodyConfig) => void;
+  /** 补全候选源（变量、内置变量等） */
+  sources?: CompletionSources;
 }
 
 const MODES: { value: BodyMode; label: string }[] = [
@@ -33,8 +38,20 @@ const MODES: { value: BodyMode; label: string }[] = [
   { value: 'binary', label: '二进制' },
 ];
 
-export default function BodyEditor({ value, onChange }: Props) {
+/** 没有传 sources 时用的空候选源（避免每次渲染都新建对象） */
+const EMPTY_SOURCES: CompletionSources = {
+  variables: [],
+  builtins: [],
+  apis: [],
+  headers: [],
+  history: [],
+};
+
+export default function BodyEditor({ value, onChange, sources }: Props) {
   const body = value ?? { mode: 'none' as BodyMode, raw: '', form: [], formData: [] };
+
+  /** 补全源（函数引用稳定，不会让编辑器重建） */
+  const completionSource = useCodemirrorCompletion(sources ?? EMPTY_SOURCES);
 
   const patch = (part: Partial<BodyConfig>) => onChange({ ...body, ...part });
 
@@ -110,17 +127,24 @@ export default function BodyEditor({ value, onChange }: Props) {
             value={body.raw ?? ''}
             height="100%"
             theme="dark"
-            extensions={
+            extensions={[
               body.mode === 'json'
-                ? [json()]
+                ? json()
                 : body.mode === 'xml'
-                  ? [xml()]
+                  ? xml()
                   : body.mode === 'html'
-                    ? [html()]
-                    : []
-            }
+                    ? html()
+                    : [],
+              // 用我们自己的补全源（变量、内置变量）替换 CodeMirror 默认的
+              autocompletion({ override: [completionSource] }),
+            ]}
             onChange={(val) => patch({ raw: val })}
-            basicSetup={{ lineNumbers: true, foldGutter: true, highlightActiveLine: false }}
+            basicSetup={{
+              lineNumbers: true,
+              foldGutter: true,
+              highlightActiveLine: false,
+              autocompletion: false,
+            }}
           />
         </div>
       )}

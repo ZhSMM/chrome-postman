@@ -28,9 +28,9 @@
 import {
   base64ToBytes,
   buildQueryString,
+  bytesToBase64,
   normalizeUrl,
   splitUrlAndQuery,
-  toBlobBuffer,
 } from '../shared/utils';
 import type {
   BodyConfig,
@@ -39,13 +39,23 @@ import type {
   HttpResponseData,
   KeyValue,
   LogEntry,
+  RequestTiming,
   ResolvedRequest,
   ScriptOutcome,
+  SslMode,
   TestResult,
   VariableScope,
 } from '../shared/types';
 import { interpolate, keyValuesToRecord, mergeScopes } from './variables';
 import { buildDiagnosticReport, type DiagnosticReport } from './network-diagnostics';
+import { formatScriptError } from './script-error';
+import {
+  createFetchSender,
+  serializeMultipartBody,
+  type HttpSender,
+  type SendPayload,
+} from './http-sender';
+import { BridgeError, describeBridgeError } from './native-bridge';
 import {
   runSandbox,
   type SandboxRequestState,
@@ -73,6 +83,33 @@ export interface ExecuteDeps {
   getNetError?: (url: string) => string | undefined;
   /** 用户在设置里填写的代理地址，仅用于生成更贴合的排查建议 */
   proxyHint?: string;
+  /**
+   * 查询某个 URL 最近一次请求的分段耗时。
+   * 由 Service Worker 注入，数据来自 chrome.webRequest 的四个事件时间戳。
+   * 没有这个依赖时，只能给出本地测的总耗时。
+   */
+  getTiming?: (url: string) => RequestTiming | undefined;
+  /**
+   * 发送网关。默认走浏览器原生 fetch；Service Worker 在需要走本机桥接时注入桥接版。
+   *
+   * 【为什么要把它做成可注入的依赖】
+   * 核心层不许碰 chrome.*，所以"要不要走 native 通道"这个决定必须由上层做。
+   * 上层决定好之后，把对应的 sender 塞进来，执行器只管调 send()。
+   */
+  sender?: HttpSender;
+  /**
+   * 本次请求的 SSL 决策（模式 + 是否跳过校验）。
+   * 由上层根据设置和桥接就绪状态算好后传进来。
+   */
+  ssl?: { mode: SslMode; allowInsecure: boolean };
+  /**
+   * SSL 降级提示。
+   *
+   * 【为什么要由上层传下来，而不是执行器自己判断】
+   * 只有上层知道桥接程序当前是否就绪。执行器拿不到这个信息，
+   * 所以"用户以为的配置 ≠ 实际做的事"这件事必须由上层算好后带下来。
+   */
+  sslNotice?: string;
 }
 
 /** 执行结果 */
@@ -83,6 +120,12 @@ export interface ExecuteOutcome {
   error?: string;
   diagnostic?: DiagnosticReport;
   totalTime: number;
+  /** 分段耗时（webRequest 可用时才有细分） */
+  timing?: RequestTiming;
+  /** 本次是否跳过了证书校验（UI 要显示横幅） */
+  insecure?: boolean;
+  /** SSL 降级提示（绝不静默降级，有值就必须在 UI 上说出来） */
+  sslNotice?: string;
 }
 
 /** 空的作用域 */
@@ -213,11 +256,30 @@ function toSandboxScope(scope: VariableScope): SandboxScope {
   };
 }
 
+/**
+ * 请求体的"通道形态"。
+ *
+ * 【为什么要两种形态】
+ * - `body`（BodyInit）是给浏览器 fetch 用的，能装 FormData / Blob；
+ * - `channel` 是给 native 通道用的，必须能被 JSON 序列化 ——
+ *   Chrome 的 native messaging 只传 JSON，塞 FormData 进去会变成空对象。
+ *
+ * 有了它，两条通道发出去的内容完全一致，用户不会遇到
+ * "在浏览器里能传文件，走桥接就丢了" 这种诡异差异。
+ */
+export type ChannelBody =
+  | { kind: 'none' }
+  | { kind: 'text'; text: string }
+  | { kind: 'binary'; base64: string };
+
 /** 步骤 ⑤：合成最终要发出去的 URL / 头 / 体 */
 export interface ComposedRequest {
   url: string;
   headers: Record<string, string>;
+  /** 给 fetch 用的请求体 */
   body?: BodyInit;
+  /** 给 native 通道用的请求体（JSON 可序列化） */
+  channel: ChannelBody;
 }
 
 export function composeRequest(resolved: ResolvedRequest): ComposedRequest {
@@ -260,6 +322,7 @@ export function composeRequest(resolved: ResolvedRequest): ComposedRequest {
   // --- 请求体 ---
   const body = resolved.body ?? { mode: 'none', raw: '', form: [], formData: [] };
   let payload: BodyInit | undefined;
+  let channel: ChannelBody = { kind: 'none' };
 
   switch (body.mode) {
     case 'json': {
@@ -270,6 +333,7 @@ export function composeRequest(resolved: ResolvedRequest): ComposedRequest {
           throw new Error(`请求体不是合法 JSON：${(err as Error).message}`);
         }
         payload = body.raw;
+        channel = { kind: 'text', text: body.raw };
         if (!Object.keys(headers).some((k) => k.toLowerCase() === 'content-type')) {
           headers['Content-Type'] = 'application/json';
         }
@@ -280,6 +344,7 @@ export function composeRequest(resolved: ResolvedRequest): ComposedRequest {
     case 'xml':
     case 'html': {
       payload = body.raw ?? '';
+      channel = { kind: 'text', text: body.raw ?? '' };
       const typeMap: Record<string, string> = {
         text: 'text/plain',
         xml: 'application/xml',
@@ -296,32 +361,33 @@ export function composeRequest(resolved: ResolvedRequest): ComposedRequest {
         .filter((item) => item.enabled && item.key)
         .forEach((item) => form.append(item.key, item.value ?? ''));
       payload = form.toString();
+      channel = { kind: 'text', text: form.toString() };
       if (!Object.keys(headers).some((k) => k.toLowerCase() === 'content-type')) {
         headers['Content-Type'] = 'application/x-www-form-urlencoded';
       }
       break;
     }
     case 'form-data': {
-      const form = new FormData();
-      (body.formData ?? [])
-        .filter((item) => item.enabled && item.key)
-        .forEach((item) => {
-          if (item.isFile) {
-            const bytes = item.fileBase64 ? base64ToBytes(item.fileBase64) : new Uint8Array();
-            const blob = new Blob([toBlobBuffer(bytes)], { type: item.mimeType || 'application/octet-stream' });
-            form.append(item.key, blob, item.fileName || 'file');
-          } else {
-            form.append(item.key, item.value ?? '');
-          }
-        });
-      payload = form;
-      // 注意：multipart 的 boundary 由浏览器自动生成，不能手动写 Content-Type
+      /*
+       * 【为什么手动序列化 multipart，而不是用 FormData】
+       * FormData 只能交给浏览器自己发 —— 走 native 通道时是 Node 在发，
+       * 它不认识 FormData，分段就丢了。所以这里统一手动序列化，
+       * 顺带把 boundary 写进 Content-Type，两条通道才能发出一模一样的字节。
+       *
+       * 另外必须**强制**覆盖 Content-Type：用户如果手填了一个不带 boundary 的
+       * multipart/form-data，服务端解析不出分段（这是 v1.1 的一个隐藏坑）。
+       */
+      const { bytes, contentType } = serializeMultipartBody(body.formData ?? []);
+      payload = bytes as unknown as BodyInit;
+      channel = { kind: 'binary', base64: bytesToBase64(bytes) };
+      headers['Content-Type'] = contentType;
       break;
     }
     case 'binary': {
       if (body.binaryBase64) {
         const bytes = base64ToBytes(body.binaryBase64);
-        payload = new Blob([toBlobBuffer(bytes)], { type: body.binaryMimeType || 'application/octet-stream' });
+        payload = bytes as unknown as BodyInit;
+        channel = { kind: 'binary', base64: body.binaryBase64 };
         if (!Object.keys(headers).some((k) => k.toLowerCase() === 'content-type')) {
           headers['Content-Type'] = body.binaryMimeType || 'application/octet-stream';
         }
@@ -335,14 +401,7 @@ export function composeRequest(resolved: ResolvedRequest): ComposedRequest {
   const query = buildQueryString(allParams);
   const url = query ? `${base}${base.includes('?') ? '&' : '?'}${query}` : base;
 
-  return { url, headers, body: payload };
-}
-
-/** 判断响应是不是二进制（是的话按 Base64 存） */
-function isBinaryContentType(contentType: string): boolean {
-  return /^(application\/octet-stream|application\/zip|application\/pdf|image\/|audio\/|video\/|font\/)/i.test(
-    contentType,
-  );
+  return { url, headers, body: payload, channel };
 }
 
 /**
@@ -350,7 +409,7 @@ function isBinaryContentType(contentType: string): boolean {
  *
  * @param request 请求草稿
  * @param scope   变量作用域
- * @param deps    可注入的依赖（fetch / 时钟 / 超时等）
+ * @param deps    可注入的依赖（发送网关 / 时钟 / 超时等）
  */
 export async function executeRequest(
   request: HttpRequest,
@@ -358,7 +417,6 @@ export async function executeRequest(
   deps: ExecuteDeps = {},
 ): Promise<ExecuteOutcome> {
   const now = deps.now ?? (() => Date.now());
-  const fetchImpl = deps.fetchImpl ?? globalThis.fetch.bind(globalThis);
   const timeout = deps.timeout ?? 30000;
   const followRedirects = deps.followRedirects ?? true;
   const sendCookies = deps.sendCookies ?? true;
@@ -376,6 +434,7 @@ export async function executeRequest(
   let response: HttpResponseData | null = null;
   let errorMessage: string | undefined;
   let diagnostic: DiagnosticReport | undefined;
+  let timing: RequestTiming | undefined;
   let targetUrl = '';
 
   /* ---------- 步骤 ③：前置拦截脚本 ---------- */
@@ -390,7 +449,10 @@ export async function executeRequest(
     outcome.logs.push(...pre.logs);
     mergeOutcomeVariables(outcome, pre.variables);
     if (pre.error) {
-      outcome.error = `前置脚本错误：${pre.error}`;
+      // 脚本错误存进 outcome.error（结构化，带行列号，UI 用它标红出错行）
+      outcome.error = pre.error;
+      // 同时把可读摘要放进顶层 error，toast 才有东西可显示
+      errorMessage = errorMessage ?? formatScriptError(pre.error);
     }
     if (pre.request) {
       applyRequestPatch(resolved, pre.request);
@@ -410,54 +472,53 @@ export async function executeRequest(
     // 赋给外层变量：失败时要用它去查网络层的错误码
     targetUrl = normalizeUrl(composed.url);
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeout);
-    try {
-      const rawResponse = await fetchImpl(targetUrl, {
-        method: resolved.method,
-        headers: composed.headers,
-        body: composed.body,
-        redirect: followRedirects ? 'follow' : 'manual',
-        credentials: sendCookies ? 'include' : 'omit',
-        signal: controller.signal,
-      });
+    /*
+     * 【发送网关 —— 整条管线唯一的分叉点】
+     * 上层没注入 sender 时，走浏览器原生 fetch（默认，绝大多数请求都是这条）。
+     * 上层注入了桥接版 sender 时，请求改由本机 Node 程序发，
+     * 这条路才有可能跳过证书校验。
+     */
+    const sender = deps.sender ?? createFetchSender({ fetchImpl: deps.fetchImpl, now });
 
-      const responseTime = Math.max(0, now() - startedAt);
-      const contentType = rawResponse.headers.get('content-type') ?? '';
-      const headerRecord: Record<string, string> = {};
-      rawResponse.headers.forEach((value, key) => {
-        headerRecord[key] = value;
-      });
+    const payload: SendPayload = {
+      method: resolved.method,
+      url: targetUrl,
+      headers: composed.headers,
+      timeoutMs: timeout,
+      followRedirects,
+      sendCookies,
+      ssl: {
+        mode: deps.ssl?.mode ?? 'strict',
+        allowInsecure: deps.ssl?.allowInsecure ?? false,
+      },
+    };
+    if (composed.channel.kind === 'text') payload.body = composed.channel.text;
+    if (composed.channel.kind === 'binary') payload.bodyBase64 = composed.channel.base64;
 
-      let bodyText: string;
-      let isBase64 = false;
-      if (isBinaryContentType(contentType)) {
-        const buffer = await rawResponse.arrayBuffer();
-        const bytes = new Uint8Array(buffer);
-        let binary = '';
-        const chunk = 0x8000;
-        for (let i = 0; i < bytes.length; i += chunk) {
-          binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
-        }
-        bodyText = btoa(binary);
-        isBase64 = true;
-      } else {
-        bodyText = await rawResponse.text();
-      }
+    const sendResult = await sender.send(payload);
 
-      response = {
-        status: rawResponse.status,
-        statusText: rawResponse.statusText,
-        headers: headerRecord,
-        body: bodyText,
-        isBase64,
-        size: bodyText.length,
-        responseTime,
-        finalUrl: rawResponse.url || targetUrl,
-      };
-    } finally {
-      clearTimeout(timer);
-    }
+    const responseTime = Math.max(0, now() - startedAt);
+    /*
+     * 二进制响应用 Base64 承载。
+     * size 沿用 v1.1 的口径（响应体字符串长度），避免历史记录的大小对不上。
+     */
+    const bodyText = sendResult.bodyBase64 ?? sendResult.body;
+    const isBase64 = sendResult.bodyBase64 !== null;
+
+    response = {
+      status: sendResult.status,
+      statusText: sendResult.statusText,
+      headers: sendResult.headers,
+      body: bodyText,
+      isBase64,
+      size: bodyText.length,
+      responseTime,
+      finalUrl: sendResult.finalUrl || targetUrl,
+      insecure: sendResult.insecure,
+    };
+
+    // 取分段耗时（webRequest 的四个事件时间戳）
+    timing = await waitForTiming(deps.getTiming, targetUrl, responseTime);
   } catch (err) {
     const e = err as Error;
     const rawMessage = e?.message ?? String(e);
@@ -469,12 +530,18 @@ export async function executeRequest(
 
     diagnostic = buildDiagnosticReport(targetUrl, rawMessage, netError, deps.proxyHint);
 
-    if (e?.name === 'AbortError') {
-      errorMessage = `请求超时（${timeout} ms）`;
+    if (e instanceof BridgeError) {
+      // 桥接通道的错误（最常见的是证书问题），文案必须具体，
+      // 不能和笼统的 "Failed to fetch" 混为一谈
+      errorMessage = errorMessage ?? describeBridgeError(e);
+    } else if (e?.name === 'AbortError') {
+      errorMessage = errorMessage ?? `请求超时（${timeout} ms）`;
     } else {
-      errorMessage = formatNetworkError(diagnostic, resolved);
+      errorMessage = errorMessage ?? formatNetworkError(diagnostic, resolved);
     }
-    outcome.error = outcome.error ?? errorMessage;
+    // 注意：网络错误**不**写进 outcome.error。
+    // outcome.error 只装脚本错误（结构化），网络错误走顶层 error 字段，
+    // 这样 UI 能明确区分"网络失败"和"脚本写错了"。
   }
 
   /* ---------- 步骤 ⑦：后置拦截脚本 ---------- */
@@ -490,7 +557,8 @@ export async function executeRequest(
     outcome.logs.push(...post.logs);
     mergeOutcomeVariables(outcome, post.variables);
     if (post.error) {
-      outcome.error = outcome.error ?? `后置脚本错误：${post.error}`;
+      outcome.error = outcome.error ?? post.error;
+      errorMessage = errorMessage ?? formatScriptError(post.error);
     }
     if (post.response && response) {
       // 脚本可以改写响应（例如把状态码改成 200 以便后续断言）
@@ -518,6 +586,14 @@ export async function executeRequest(
     error: errorMessage,
     diagnostic,
     totalTime: Math.max(0, now() - startedAt),
+    timing,
+    /*
+     * 本次是否跳过了证书校验。
+     * 以 SSL 决策为准 —— 决策层已经保证了"要跳过但桥接没就绪"时会退回严格校验。
+     */
+    insecure: deps.ssl?.allowInsecure ?? false,
+    // 降级提示原样往上带，UI 必须显示出来（绝不静默）
+    sslNotice: deps.sslNotice,
   };
 }
 
@@ -542,6 +618,41 @@ async function waitForNetError(
     found = getNetError(url);
   }
   return found;
+}
+
+/**
+ * 轮询等待分段耗时数据出现。
+ *
+ * 【为什么也要轮询】
+ * 和网络错误码一样：fetch resolve 与 webRequest.onCompleted 是两条独立通路，
+ * onCompleted 可能在 fetch 之后才触发。等一小会儿就能拿到完整的四段时间戳。
+ *
+ * @param fallbackTotal 本地测到的总耗时（webRequest 没数据时兜底）
+ */
+async function waitForTiming(
+  getTiming: ((url: string) => RequestTiming | undefined) | undefined,
+  url: string,
+  fallbackTotal: number,
+  timeoutMs = 500,
+): Promise<RequestTiming> {
+  const fallback: RequestTiming = {
+    phases: { connect: 0, waiting: 0, download: 0 },
+    total: fallbackTotal,
+    fromCache: false,
+    redirects: 0,
+    source: 'local',
+  };
+
+  if (!getTiming || !url) return fallback;
+
+  const deadline = Date.now() + timeoutMs;
+  let found = getTiming(url);
+  while (!found && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 60));
+    found = getTiming(url);
+  }
+  // 拿到了分段数据就用它，否则退回本地总耗时
+  return found ?? fallback;
 }
 
 /** 把响应转成沙箱结构 */
