@@ -513,7 +513,160 @@ chrome://extensions
 
 ---
 
-## 11. 踩坑清单
+## 11. chrome.webRequest —— 看清真实网络错误
+
+### 11.1 它解决什么问题
+
+`fetch` 失败时，Chrome 抛给 JS 的**只有一句** `TypeError: Failed to fetch`。
+域名写错、网络不通、代理挂了、证书有问题 —— 在控制台里长得一模一样。
+
+真正的错误码在浏览器网络层，JS 拿不到。唯一能拿到它的办法就是 `chrome.webRequest`。
+
+### 11.2 本项目的实测结论
+
+用 `scripts/proxy-probe.mjs` 起一个本地代理实测（Chrome 带 `--proxy-server` 启动）：
+
+```
+代理收到的请求：
+  - http    http://proxy-probe.test/api/plain      ← 明文 HTTP 走 absolute-URI
+  - connect proxy-probe.test:443                   ← HTTPS 走 CONNECT 隧道
+
+扩展的明文 HTTP 请求是否经过代理：是 ✅
+扩展的 HTTPS 请求是否到达代理：  是 ✅
+结论：扩展请求遵循浏览器代理设置
+```
+
+**所以"扩展不走代理"是个误解**。失败发生在**代理侧**，而 Chrome 把原因吞成了 `Failed to fetch`。
+
+### 11.3 API 参数表
+
+#### `chrome.webRequest.onErrorOccurred.addListener(callback, filter)`
+
+| 参数 | 类型 | 说明 |
+|---|---|---|
+| `callback` | `(details) => void` | 请求出错时触发 |
+| `filter` | object | 见下 |
+
+`details` 常用字段：
+
+| 字段 | 说明 | 示例 |
+|---|---|---|
+| `error` | **网络错误码（最有价值的字段）** | `net::ERR_TUNNEL_CONNECTION_FAILED` |
+| `url` | 出错的完整 URL | `https://api.example.com/users` |
+| `method` | 请求方法 | `GET` |
+| `type` | 资源类型 | `xmlhttprequest` / `main_frame` |
+| `tabId` | 标签页 id（-1 表示非标签页发起） | `-1` |
+| `initiator` | 发起方 | `chrome-extension://abc...` |
+
+`filter` 参数：
+
+| 字段 | 说明 |
+|---|---|
+| `urls` | URL 匹配模式数组，如 `['<all_urls>']` |
+| `types` | 资源类型过滤，如 `['xmlhttprequest']` |
+
+```js
+chrome.webRequest.onErrorOccurred.addListener(
+  (details) => {
+    console.log(details.error, details.url);
+    // net::ERR_PROXY_CONNECTION_FAILED  https://api.example.com/users
+  },
+  { urls: ['<all_urls>'] },
+);
+```
+
+### 11.4 权限要求
+
+| 要求 | 说明 |
+|---|---|
+| `"webRequest"` | API 权限。可以放在 `optional_permissions` 里按需申请 |
+| host permissions | 观察某个域名需要对应的 host 权限（本项目是 `<all_urls>`） |
+
+**注意**：MV3 里 `webRequest` **只能观察，不能拦截**（`webRequestBlocking` 需要企业策略）。想改写请求请用 `declarativeNetRequest`。
+
+### 11.5 踩坑限制
+
+| 坑 | 说明 | 本项目做法 |
+|---|---|---|
+| **没有权限时 addListener 直接抛错** | 不能先注册再判断 | 先 `chrome.permissions.contains()` 检查再注册 |
+| **监听的是整个浏览器，不是只有扩展自己的请求** | 页面的请求也会触发 | 用 URL + 时间窗口做近似匹配 |
+| **fetch 的 requestId 拿不到** | 两条独立通路 | URL 匹配 + 短暂轮询（见执行器 `waitForNetError`） |
+| **Service Worker 休眠会丢监听器** | 顶层代码会被重新执行 | 每次 SW 启动时重新注册 |
+
+---
+
+## 12. chrome.permissions —— 按需申请可选权限
+
+### 12.1 为什么用它
+
+不是所有权限都值得在安装时就向用户索要。Chrome 官方推荐：把"锦上添花"的功能做成**可选权限**，
+用户点了才授予，没点就不给 —— 安装时也不会出现对应的权限警告。
+
+### 12.2 哪些权限不能设为可选
+
+以下权限**必须**放在 `permissions` 里，无法按需申请：
+
+```
+debugger  declarativeNetRequest  devtools  experimental
+geolocation  mdns  proxy  tts  ttsEngine  wallpaper
+```
+
+> 特别注意 **`proxy`**：它不能设为可选。申请它会在安装时弹出"管理你的代理设置"的警告。
+> 本项目因此**没有申请** proxy 权限，只用 webRequest（可以设为可选）来定位代理问题。
+
+### 12.3 API 参数表
+
+#### `chrome.permissions.contains(permissions)`
+
+| 参数 | 类型 | 说明 |
+|---|---|---|
+| `permissions.permissions` | string[] | 要检查的 API 权限 |
+| `permissions.origins` | string[] | 要检查的主机权限 |
+
+```js
+const granted = await chrome.permissions.contains({ permissions: ['webRequest'] });
+```
+
+#### `chrome.permissions.request(permissions, callback?)`
+
+```js
+const granted = await chrome.permissions.request({ permissions: ['webRequest'] });
+```
+
+**必须在用户手势（点击）里调用**，否则报 `This function must be called during a user gesture`。
+调用后会弹出权限气泡，用户同意才返回 `true`。
+
+#### `chrome.permissions.remove(permissions)`
+
+```js
+await chrome.permissions.remove({ permissions: ['webRequest'] });
+```
+
+#### `chrome.permissions.onAdded` / `onRemoved`
+
+```js
+chrome.permissions.onAdded.addListener((permissions) => {
+  if (permissions.permissions.includes('webRequest')) {
+    startListening();   // 权限刚拿到，立刻开始工作
+  }
+});
+```
+
+### 12.4 本项目的用法
+
+```json
+{
+  "permissions": ["storage", "unlimitedStorage", "contextMenus"],
+  "optional_permissions": ["webRequest"]
+}
+```
+
+用户在「⋯ → 设置 → 网络诊断」点一下按钮才授予。Service Worker 侧监听
+`chrome.permissions.onAdded`，授权后立刻注册 webRequest 监听器（不用等 SW 下次唤醒）。
+
+---
+
+## 13. 踩坑清单
 
 按本项目开发中真实踩到的顺序：
 
@@ -531,6 +684,9 @@ chrome://extensions
 | 10 | QuickJS 回调拿不到参数 | 0.32 版回调不传 `this` 句柄 | 回调只接收来宾参数 |
 | 11 | PowerShell 脚本报"字符串缺少终止符" | PS 5.1 按 ANSI 读无 BOM 的 .ps1 | 脚本存 UTF-8 **带 BOM**，或全用 ASCII |
 | 12 | `Uint8Array` 不能传给 `new Blob()` | TS 5.7 TypedArray 泛型化 | 复制一份取 `.buffer` 再传 |
+| 13 | **设了代理后扩展请求全失败** | **失败发生在代理侧，但 Chrome 把原因吞成 `Failed to fetch`** | **开网络诊断拿真实错误码（见 §11）** |
+| 14 | `permissions.request` 报 "must be called during a user gesture" | 没有用户手势 | 只能从点击事件里调用 |
+| 15 | headless 里授权被自动拒绝 | headless 弹不出权限气泡 | 测试用"权限提为必需"的变体扩展 |
 
 ---
 
@@ -547,6 +703,9 @@ chrome://extensions
 | `chrome.contextMenus.create/onClicked` | 右键菜单 | `service-worker.ts` |
 | `chrome.tabs.create` | 打开工作台 | `service-worker.ts`、`popup/main.tsx` |
 | `chrome.action`（配置） | 图标与 Popup | `public/manifest.json` |
+| **`chrome.webRequest.onErrorOccurred`** | **捕获真实网络错误码** | **`src/background/service-worker.ts`** |
+| **`chrome.permissions.contains/request/remove`** | **按需申请网络诊断权限** | **`src/dashboard/App.tsx`、`service-worker.ts`** |
+| **`chrome.permissions.onAdded`** | **授权后立刻注册监听** | **`src/background/service-worker.ts`** |
 | IndexedDB | 历史记录 | `src/core/db.ts` |
 | WebAssembly | QuickJS 脚本沙箱 | `src/core/sandbox.ts` |
 | `fetch` | 真实请求 | `src/core/request-executor.ts` |

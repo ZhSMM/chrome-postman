@@ -539,17 +539,78 @@ form-data **不能手动写 Content-Type**：boundary 由浏览器生成，手�
 | 前置 | method / url / headers / body / auth | 覆盖 `ResolvedRequest` 对应字段后，再走 ⑤ 合成 |
 | 后置 | code / status / headers / body | 覆盖 `HttpResponseData` 后返回给 UI 展示 |
 
-### 10.6 错误翻译
+### 10.6 错误翻译与网络诊断
 
-网络层只给出 `Failed to fetch` 时，用户无从下手。本项目把它翻译成可执行建议：
+网络层只给出 `Failed to fetch` 时，用户无从下手。本项目分两层处理：
+
+**第一层（默认开启）**：把错误翻译成可执行建议。
 
 ```
 请求失败：无法连接到 https://api.example.com/users。
-可能原因：① 域名不存在或拼写错误；② 网络不通；③ 服务端拒绝跨域且扩展未获得该域名的访问权限；④ HTTPS 页面访问 HTTP 接口被浏览器拦截。
-（原始错误：Failed to fetch）
+
+可能原因：
+  ① 域名不存在或拼写错误；
+  ② 本机网络不通；
+  ③ 浏览器设置了代理，而目标域名被代理规则拦截或代理自身故障；
+  ④ 服务端拒绝跨域且扩展未获得该域名的访问权限；
+  ⑤ HTTPS 页面访问 HTTP 接口被浏览器拦截。
 ```
 
-超时单独识别为 `请求超时（30000 ms）`。
+**第二层（需用户授权）**：读取 Chrome 网络层的**真实错误码**。
+
+真实错误码（`net::ERR_PROXY_CONNECTION_FAILED` 之类）只有浏览器网络层知道，
+`fetch` 抛给 JS 的只有一句 `Failed to fetch`。唯一的取法是
+`chrome.webRequest.onErrorOccurred`。
+
+```mermaid
+graph LR
+    A["fetch 失败"] --> B["waitForNetError()<br/>按 URL + 时间窗轮询"]
+    C["chrome.webRequest<br/>onErrorOccurred"] --> D["NetErrorBuffer<br/>内存环形缓冲"]
+    D --> B
+    B --> E["buildDiagnosticReport()"]
+    E --> F["错误码 → 中文解释<br/>+ 可执行建议"]
+    F --> G["响应区「诊断」标签页"]
+```
+
+**实测依据**（`scripts/proxy-probe.mjs`，用本地代理 + 真实 Chrome 验证）：
+
+```
+代理收到的请求：
+  - http    http://proxy-probe.test/api/plain      ← 明文 HTTP 走 absolute-URI
+  - connect proxy-probe.test:443                   ← HTTPS 走 CONNECT 隧道
+
+扩展的明文 HTTP 请求是否经过代理：是 ✅
+扩展的 HTTPS 请求是否到达代理：  是 ✅
+结论：扩展请求遵循浏览器代理设置
+```
+
+这条结论很重要：它排除了"扩展绕过代理"这种误解，把问题定位到**代理侧**。
+失败发生在代理侧，而 Chrome 把原因吞掉了 —— 所以工具要做的是把原因捞出来。
+
+**权限设计上的克制**：
+
+| 权限 | 放哪 | 理由 |
+|---|---|---|
+| `webRequest` | `optional_permissions` | 可以按需申请，默认安装零额外警告；用户点了按钮才授予 |
+| `proxy` | **不申请** | Chrome 不允许把它设为可选（必须放 `permissions`），会触发"管理你的代理设置"的安装警告 |
+
+因此工具**只读**地观察网络错误，**不修改**用户的代理设置 —— 那属于全局配置，
+擅自改动会影响用户所有的网页访问。
+
+**已知错误码与建议**（`src/core/network-diagnostics.ts`，共 20+ 条）：
+
+| 错误码 | 结论 | 是否代理相关 |
+|---|---|---|
+| `ERR_PROXY_CONNECTION_FAILED` | 代理服务器连不上 | ✅ |
+| `ERR_TUNNEL_CONNECTION_FAILED` | HTTPS 隧道（CONNECT）建立失败 | ✅ |
+| `ERR_CERT_AUTHORITY_INVALID` | 证书不受信任（多半是代理在做 HTTPS 解密） | ✅ |
+| `ERR_PROXY_CONNECTION_AUTH_UNSUPPORTED` | 代理要求认证但浏览器没能完成 | ✅ |
+| `ERR_SOCKS_CONNECTION_FAILED` | SOCKS 代理连接失败 | ✅ |
+| `ERR_NAME_NOT_RESOLVED` | 域名解析失败 | ✅ |
+| `ERR_BLOCKED_BY_CLIENT` | 被另一个扩展拦截 | ❌ |
+| `ERR_CONNECTION_REFUSED` | 目标服务器拒绝连接 | ❌ |
+
+每条建议都是**用户能自己动手做的事**，而不是"请检查网络"这种废话。
 
 ---
 
@@ -647,6 +708,7 @@ CSS 变量 + `data-theme` 属性。设置项支持「跟随系统 / 深色 / 浅
 | `unlimitedStorage` | 突破 10MB 配额 | 可选（数据量大时再申请） |
 | `contextMenus` | 右键菜单"在此 URL 上发起请求" | 可选 |
 | `host_permissions: <all_urls>` | 跨域发请求，绕过 CORS | **无法更小**：Postman 类工具必须能访问任意 API |
+| `optional_permissions: webRequest` | 读取真实网络错误码（代理/证书问题定位） | **已经是可选**：用户点按钮才授予 |
 
 > Chrome Web Store 审核会重点关注 `<all_urls>`。发布时需要在商店页说明用途（本工具只向用户显式指定的 URL 发请求）。
 
@@ -684,7 +746,7 @@ graph TD
     E --> E4["React 工作台渲染"]
 ```
 
-### 14.2 单元测试（45 条，全部通过）
+### 14.2 单元测试（63 条，全部通过）
 
 | 文件 | 条数 | 覆盖点 |
 |---|---|---|
@@ -692,6 +754,7 @@ graph TD
 | `tests/executor.test.ts` | 19 | 插值、鉴权映射、body 序列化、前置改写、二次插值、后置断言、变量提取、超时、网络错误翻译 |
 | `tests/sandbox.test.ts` | 9 | pm API 读写、断言通过/失败、console 收集、异常捕获、死循环超时、**沙箱隔离（无 chrome/DOM）** |
 | `tests/codelib.test.ts` | 8 | cURL 生成与转义、HAR 结构、HAR 反解 |
+| `tests/network-diagnostics.test.ts` | 18 | 错误码翻译、错误记录匹配、环形缓冲、诊断报告生成 |
 
 ### 14.3 端到端验证（8 项，全部通过）
 
