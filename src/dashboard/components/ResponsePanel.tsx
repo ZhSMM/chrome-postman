@@ -2,12 +2,14 @@
  * 响应面板：状态栏 + Body / Headers / Tests / Console 四个视图。
  */
 import { useMemo, useState } from 'react';
-import type { ExecutionResult, ScriptOutcome } from '../../shared/types';
+import type { DiagnosticReport, ExecutionResult, ScriptOutcome } from '../../shared/types';
 import { formatBytes, formatMs } from '../../shared/utils';
 
 interface Props {
   response: ExecutionResult['response'];
   outcome: ScriptOutcome | null;
+  /** 最近一次失败的网络诊断报告 */
+  diagnostic?: DiagnosticReport | null;
 }
 
 /** 把 JSON 美化输出；不是合法 JSON 就原样返回 */
@@ -19,8 +21,8 @@ function prettify(text: string): string {
   }
 }
 
-export default function ResponsePanel({ response, outcome }: Props) {
-  const [tab, setTab] = useState<'body' | 'headers' | 'tests' | 'console'>('body');
+export default function ResponsePanel({ response, outcome, diagnostic }: Props) {
+  const [tab, setTab] = useState<'body' | 'headers' | 'tests' | 'console' | 'diagnostic'>('body');
   const [pretty, setPretty] = useState(true);
 
   const isJson = useMemo(() => {
@@ -93,6 +95,16 @@ export default function ResponsePanel({ response, outcome }: Props) {
           Console
           {!!logs.length && <span className="tab-badge">{logs.length}</span>}
         </button>
+        {diagnostic && (
+          <button
+            className={`tab ${tab === 'diagnostic' ? 'active' : ''}`}
+            onClick={() => setTab('diagnostic')}
+            style={{ color: tab === 'diagnostic' ? 'var(--red)' : undefined }}
+          >
+            诊断
+            {diagnostic.netError && <span className="tab-badge">!</span>}
+          </button>
+        )}
       </div>
 
       <div className="panel">
@@ -179,6 +191,77 @@ export default function ResponsePanel({ response, outcome }: Props) {
           ) : (
             <div className="empty-state">脚本里用 console.log(...) 打印的内容会出现在这里</div>
           ))}
+
+        {tab === 'diagnostic' && diagnostic && (
+          <div className="diagnostic">
+            <div className="diag-head">
+              <span className={`status-badge ${diagnostic.explanation?.proxyRelated ? 'warn' : 'err'}`}>
+                {diagnostic.explanation?.title ?? '请求失败'}
+              </span>
+              {diagnostic.netError ? (
+                <span className="mono faint">{diagnostic.netError}</span>
+              ) : (
+                <span className="faint">未获取到网络错误码</span>
+              )}
+              <span className="spacer" />
+              <button
+                className="btn sm ghost"
+                onClick={() => {
+                  const text = [
+                    `目标地址: ${diagnostic.url}`,
+                    `原始错误: ${diagnostic.rawError}`,
+                    `网络错误码: ${diagnostic.netError ?? '(未捕获)'}`,
+                    diagnostic.explanation ? `结论: ${diagnostic.explanation.title}` : '',
+                    diagnostic.explanation?.detail ?? '',
+                    '',
+                    '排查建议:',
+                    ...diagnostic.suggestions.map((s, i) => `${i + 1}. ${s}`),
+                  ]
+                    .filter(Boolean)
+                    .join('\n');
+                  navigator.clipboard.writeText(text).then(
+                    () => alert('诊断报告已复制到剪贴板'),
+                    () => alert(text),
+                  );
+                }}
+              >
+                复制报告
+              </button>
+            </div>
+
+            {diagnostic.explanation ? (
+              <p className="diag-detail">{diagnostic.explanation.detail}</p>
+            ) : (
+              <p className="diag-detail">
+                这次没有拿到 Chrome 内部的网络错误码 —— 说明「网络诊断」还没开启，
+                或者错误不是发生在网络层。
+                <br />
+                在「⋯ → 设置」里开启<b>网络诊断</b>后重试，就能看到
+                <span className="mono"> net::ERR_xxx </span>
+                这样的真实原因（代理问题、证书问题、DNS 问题会分别给出不同的建议）。
+              </p>
+            )}
+
+            {!!diagnostic.suggestions.length && (
+              <>
+                <div className="muted" style={{ marginTop: 12, marginBottom: 6 }}>
+                  排查建议
+                </div>
+                <ol className="diag-list">
+                  {diagnostic.suggestions.map((item, index) => (
+                    <li key={index}>{item}</li>
+                  ))}
+                </ol>
+              </>
+            )}
+
+            {diagnostic.proxyHint && (
+              <div className="muted" style={{ marginTop: 12 }}>
+                你填写的代理地址：<span className="mono">{diagnostic.proxyHint}</span>
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

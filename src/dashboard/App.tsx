@@ -245,7 +245,7 @@ export default function App() {
           </div>
 
           <RequestEditor />
-          <ResponsePanel response={store.response} outcome={store.outcome} />
+          <ResponsePanel response={store.response} outcome={store.outcome} diagnostic={store.diagnostic} />
         </main>
       </div>
 
@@ -271,9 +271,43 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
   const store = useAppStore();
   const settings = store.settings;
 
+  /** 是否已授予 webRequest 可选权限（网络诊断能力） */
+  const [diagGranted, setDiagGranted] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    chrome.permissions
+      .contains({ permissions: ['webRequest'] })
+      .then(setDiagGranted)
+      .catch(() => setDiagGranted(false));
+  }, []);
+
+  /** 开启网络诊断：必须由用户手势触发 */
+  const enableDiagnostics = async () => {
+    try {
+      const granted = await chrome.permissions.request({ permissions: ['webRequest'] });
+      setDiagGranted(granted);
+      store.pushToast(
+        granted ? '网络诊断已开启' : '未获得权限，诊断功能保持关闭',
+        granted ? 'success' : 'error',
+      );
+    } catch (err) {
+      store.pushToast(`申请权限失败：${(err as Error).message}`, 'error');
+    }
+  };
+
+  const disableDiagnostics = async () => {
+    try {
+      await chrome.permissions.remove({ permissions: ['webRequest'] });
+      setDiagGranted(false);
+      store.pushToast('网络诊断已关闭', 'success');
+    } catch (err) {
+      store.pushToast(`关闭失败：${(err as Error).message}`, 'error');
+    }
+  };
+
   return (
     <div className="modal-mask" onClick={onClose}>
-      <div className="modal" style={{ width: 'min(480px, 92vw)' }} onClick={(e) => e.stopPropagation()}>
+      <div className="modal" style={{ width: 'min(560px, 92vw)' }} onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           设置
           <span className="spacer" />
@@ -335,6 +369,54 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
             <span>携带 Cookie</span>
           </label>
 
+          <div className="divider" />
+
+          {/* ---------- 网络诊断 ---------- */}
+          <div className="perm-card">
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span className="title">网络诊断</span>
+              <span className={`perm-state ${diagGranted ? 'on' : ''}`}>
+                {diagGranted === null ? '检测中…' : diagGranted ? '已开启' : '未开启'}
+              </span>
+            </div>
+            <div className="desc">
+              开启后，工具会读取 Chrome 网络层的真实错误码（例如
+              <span className="mono">net::ERR_PROXY_CONNECTION_FAILED</span>），
+              从而判断请求是卡在代理、证书、DNS 还是目标服务器，
+              并给出对应的解决步骤。
+              <br />
+              该能力需要「webRequest」权限，属于<b>可选权限</b> —— 只有你点下面的按钮才会授予，
+              默认不授予。
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              {diagGranted ? (
+                <button className="btn sm" onClick={disableDiagnostics}>
+                  关闭网络诊断
+                </button>
+              ) : (
+                <button className="btn sm primary" onClick={enableDiagnostics}>
+                  开启网络诊断
+                </button>
+              )}
+            </div>
+          </div>
+
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ width: 90 }}>代理地址</span>
+            <input
+              className="mono"
+              style={{ flex: 1 }}
+              placeholder="可选，如 http://127.0.0.1:7890"
+              value={settings.proxyHint ?? ''}
+              onChange={(e) => store.updateSettings({ proxyHint: e.target.value })}
+            />
+          </label>
+          <div className="faint" style={{ fontSize: 11.5, lineHeight: 1.7 }}>
+            填写后，代理相关的报错会额外提醒你检查这个代理地址。
+            工具本身<b>不会修改</b>你的代理设置。
+          </div>
+
+          <div className="divider" />
           <div className="faint" style={{ fontSize: 12, lineHeight: 1.8 }}>
             快捷键：<span className="kbd">Ctrl</span> + <span className="kbd">Enter</span> 发送请求
             <br />

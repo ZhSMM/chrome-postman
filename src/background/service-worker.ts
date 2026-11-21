@@ -25,6 +25,7 @@
 import { MSG } from '../shared/messages';
 import type { ExecutionResult, HttpRequest, VariableScope } from '../shared/types';
 import { executeRequest } from '../core/request-executor';
+import { NetErrorBuffer } from '../core/network-diagnostics';
 import {
   getActiveEnvironmentId,
   getCollections,
@@ -45,6 +46,84 @@ import { uid } from '../shared/utils';
  * 需要长期保留请用 pm.environment.set（会落到 chrome.storage）。
  */
 const sessionVariables: Record<string, string> = {};
+
+/**
+ * 网络层错误记录缓冲。
+ *
+ * 数据来自 chrome.webRequest.onErrorOccurred —— 那是浏览器网络层才知道的
+ * 真实错误码（net::ERR_PROXY_CONNECTION_FAILED 等），
+ * fetch 抛给 JS 的只有一句 "Failed to fetch"。
+ */
+const netErrors = new NetErrorBuffer();
+
+/** 是否已经注册了 webRequest 监听器 */
+let webRequestWatching = false;
+/** 注册过程本身的 Promise，避免并发重复注册（权限授予事件与 SW 唤醒可能同时触发） */
+let watcherPromise: Promise<void> | null = null;
+
+/** 检查是否已获得可选的 webRequest 权限 */
+async function hasWebRequestPermission(): Promise<boolean> {
+  try {
+    return await chrome.permissions.contains({ permissions: ['webRequest'] });
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 注册网络错误监听器。
+ *
+ * 【为什么要有权限才注册】
+ * webRequest 是可选权限，用户没授予时调用 addListener 会直接抛错，
+ * 而且我们只想在用户明确开启诊断时才监听（最小权限原则）。
+ */
+function startNetworkWatcher(): Promise<void> {
+  if (watcherPromise) return watcherPromise;
+
+  watcherPromise = (async () => {
+    if (!(await hasWebRequestPermission())) {
+      watcherPromise = null; // 允许后续重试
+      return;
+    }
+    if (!chrome.webRequest?.onErrorOccurred) {
+      watcherPromise = null;
+      return;
+    }
+
+    try {
+      chrome.webRequest.onErrorOccurred.addListener(
+        (details) => {
+          netErrors.add({
+            url: details.url,
+            method: details.method,
+            error: details.error,
+            time: Date.now(),
+            tabId: details.tabId,
+            initiator: details.initiator,
+          });
+        },
+        { urls: ['<all_urls>'] },
+      );
+      webRequestWatching = true;
+      console.info('[sw] 网络诊断已启用');
+    } catch (err) {
+      console.warn('[sw] 注册网络诊断监听失败', err);
+      watcherPromise = null;
+    }
+  })();
+
+  return watcherPromise;
+}
+
+// Service Worker 每次被唤醒都会重新执行顶层代码，所以这里要重新注册监听
+startNetworkWatcher();
+
+// 用户在设置里授权后，立刻开始监听（不用等 SW 下次唤醒）
+chrome.permissions.onAdded.addListener((permissions) => {
+  if (permissions?.permissions?.includes('webRequest')) {
+    startNetworkWatcher();
+  }
+});
 
 /**
  * 组装当前请求能看到的变量作用域。
@@ -152,6 +231,9 @@ async function handleExecute(request: HttpRequest, requestId: string): Promise<E
     timeout: settings.timeout,
     followRedirects: settings.followRedirects,
     sendCookies: settings.sendCookies,
+    // 把网络错误码查询能力注入执行器，失败时才能给出精确原因
+    getNetError: (url) => netErrors.find(url)?.error,
+    proxyHint: settings.proxyHint,
   });
 
   // 变量落盘
@@ -169,6 +251,7 @@ async function handleExecute(request: HttpRequest, requestId: string): Promise<E
     response: outcome.response,
     outcome: outcome.outcome,
     error: outcome.error,
+    diagnostic: outcome.diagnostic,
     totalTime: outcome.totalTime,
   };
 }

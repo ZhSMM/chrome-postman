@@ -16,6 +16,7 @@ import {
   emptyAuth,
   emptyBody,
   type Collection,
+  type DiagnosticReport,
   type Environment,
   type ExecutionResult,
   type Folder,
@@ -89,6 +90,8 @@ interface AppState {
   currentSaved: boolean;
   response: ExecutionResult['response'];
   outcome: ScriptOutcome | null;
+  /** 最近一次失败的网络诊断报告 */
+  diagnostic: DiagnosticReport | null;
   sending: boolean;
   history: HistoryItem[];
   toasts: Toast[];
@@ -141,6 +144,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   currentSaved: false,
   response: null,
   outcome: null,
+  diagnostic: null,
   sending: false,
   history: [],
   toasts: [],
@@ -300,11 +304,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   async send() {
     const { currentRequest, sending } = get();
     if (sending) return;
-    set({ sending: true, response: null, outcome: null });
+    set({ sending: true, response: null, outcome: null, diagnostic: null });
 
     try {
       const result = await sendRequestToWorker(currentRequest);
-      set({ response: result.response, outcome: result.outcome });
+      set({ response: result.response, outcome: result.outcome, diagnostic: result.diagnostic ?? null });
       if (result.error) {
         get().pushToast(result.error, 'error');
       } else {

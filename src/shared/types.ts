@@ -172,8 +172,38 @@ export interface Settings {
   sendCookies: boolean;
   /** 是否在 UI 里显示断言结果 */
   historyLimit: number;
-  /** 代理（可选）—— 暂未实现，仅占位 */
-  proxy?: string;
+  /** 代理地址（仅用于诊断提示，填写后报错信息会附带代理相关的排查建议） */
+  proxyHint?: string;
+}
+
+/** 某个网络错误码的解释 */
+export interface ErrorExplanation {
+  /** 原始错误码，如 net::ERR_PROXY_CONNECTION_FAILED */
+  code: string;
+  /** 一句话标题 */
+  title: string;
+  /** 详细说明 */
+  detail: string;
+  /** 可执行的解决步骤 */
+  suggestions: string[];
+  /** 是否与代理有关 */
+  proxyRelated: boolean;
+}
+
+/** 一次失败请求的诊断报告 */
+export interface DiagnosticReport {
+  /** 目标 URL */
+  url: string;
+  /** JS 层拿到的原始错误（通常是 "Failed to fetch"） */
+  rawError: string;
+  /** 网络层真实错误码（启用诊断后才能拿到） */
+  netError: string | null;
+  /** 错误码的中文解释 */
+  explanation: ErrorExplanation | null;
+  /** 用户配置的代理地址 */
+  proxyHint?: string;
+  /** 综合后的排查建议 */
+  suggestions: string[];
 }
 
 /**
@@ -271,6 +301,8 @@ export interface ExecutionResult {
   error?: string;
   /** 整体耗时 */
   totalTime: number;
+  /** 失败时的网络诊断报告（仅在请求失败时出现） */
+  diagnostic?: DiagnosticReport;
 }
 
 /** 历史记录条目 */

@@ -45,6 +45,7 @@ import type {
   VariableScope,
 } from '../shared/types';
 import { interpolate, keyValuesToRecord, mergeScopes } from './variables';
+import { buildDiagnosticReport, type DiagnosticReport } from './network-diagnostics';
 import {
   runSandbox,
   type SandboxRequestState,
@@ -64,6 +65,14 @@ export interface ExecuteDeps {
   followRedirects?: boolean;
   /** 是否携带 Cookie，默认 true */
   sendCookies?: boolean;
+  /**
+   * 查询某个 URL 最近一次的网络层错误码（net::ERR_xxx）。
+   * 由 Service Worker 注入，内部数据来自 chrome.webRequest.onErrorOccurred。
+   * 没有这个依赖时，错误提示只能给出笼统的 "Failed to fetch"。
+   */
+  getNetError?: (url: string) => string | undefined;
+  /** 用户在设置里填写的代理地址，仅用于生成更贴合的排查建议 */
+  proxyHint?: string;
 }
 
 /** 执行结果 */
@@ -72,6 +81,7 @@ export interface ExecuteOutcome {
   response: HttpResponseData | null;
   outcome: ScriptOutcome;
   error?: string;
+  diagnostic?: DiagnosticReport;
   totalTime: number;
 }
 
@@ -365,6 +375,8 @@ export async function executeRequest(
   let resolved = resolveRequest(request, currentScope);
   let response: HttpResponseData | null = null;
   let errorMessage: string | undefined;
+  let diagnostic: DiagnosticReport | undefined;
+  let targetUrl = '';
 
   /* ---------- 步骤 ③：前置拦截脚本 ---------- */
   if (request.preScript?.trim()) {
@@ -395,7 +407,8 @@ export async function executeRequest(
   /* ---------- 步骤 ⑤⑥：合成并发送 ---------- */
   try {
     const composed = composeRequest(resolved);
-    const targetUrl = normalizeUrl(composed.url);
+    // 赋给外层变量：失败时要用它去查网络层的错误码
+    targetUrl = normalizeUrl(composed.url);
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeout);
@@ -447,10 +460,19 @@ export async function executeRequest(
     }
   } catch (err) {
     const e = err as Error;
+    const rawMessage = e?.message ?? String(e);
+
+    // 取网络层的真实错误码（如果用户启用了网络诊断）。
+    // webRequest 事件与 fetch 的 reject 是两条独立通路，存在先后竞态，
+    // 所以这里短暂轮询一下，避免"错误先到、事件后到"导致查不到。
+    const netError = deps.getNetError ? await waitForNetError(deps.getNetError, targetUrl) : undefined;
+
+    diagnostic = buildDiagnosticReport(targetUrl, rawMessage, netError, deps.proxyHint);
+
     if (e?.name === 'AbortError') {
       errorMessage = `请求超时（${timeout} ms）`;
     } else {
-      errorMessage = describeNetworkError(e, resolved);
+      errorMessage = formatNetworkError(diagnostic, resolved);
     }
     outcome.error = outcome.error ?? errorMessage;
   }
@@ -494,8 +516,32 @@ export async function executeRequest(
     response,
     outcome,
     error: errorMessage,
+    diagnostic,
     totalTime: Math.max(0, now() - startedAt),
   };
+}
+
+/**
+ * 轮询等待网络层错误码出现。
+ *
+ * 【为什么要轮询而不是直接查一次】
+ * fetch 的 Promise reject 与 chrome.webRequest.onErrorOccurred 事件
+ * 分别走 Blink 和浏览器进程两条通路，谁先到并不确定。
+ * 实测中大部分情况是事件先到，但为了稳妥，失败后短暂等一下再取。
+ */
+async function waitForNetError(
+  getNetError: (url: string) => string | undefined,
+  url: string,
+  timeoutMs = 600,
+): Promise<string | undefined> {
+  if (!url) return undefined;
+  const deadline = Date.now() + timeoutMs;
+  let found = getNetError(url);
+  while (!found && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 60));
+    found = getNetError(url);
+  }
+  return found;
 }
 
 /** 把响应转成沙箱结构 */
@@ -521,19 +567,51 @@ function mergeOutcomeVariables(
 }
 
 /**
- * 把底层的网络错误翻译成用户能看懂的提示。
- * 这是"新手友好"的重要一环：光说 "Failed to fetch" 没人知道该干嘛。
+ * 把诊断报告渲染成用户能看懂的错误文案。
+ *
+ * 分两层：
+ *   1. 第一行给结论（"代理服务器连不上"），让人一眼知道方向
+ *   2. 后面给可执行的步骤，而不是"请检查网络"这种废话
  */
-function describeNetworkError(error: Error, resolved: ResolvedRequest): string {
-  const message = error?.message ?? String(error);
-  if (/Failed to fetch|NetworkError|load failed/i.test(message)) {
+function formatNetworkError(diagnostic: DiagnosticReport, resolved: ResolvedRequest): string {
+  const lines: string[] = [];
+  const explanation = diagnostic.explanation;
+
+  if (explanation) {
+    lines.push(`请求失败：${explanation.title}`);
+    lines.push('');
+    lines.push(explanation.detail);
+    if (diagnostic.suggestions.length) {
+      lines.push('');
+      lines.push('排查建议：');
+      diagnostic.suggestions.forEach((item, index) => {
+        lines.push(`  ${index + 1}. ${item}`);
+      });
+    }
+    lines.push('');
+    lines.push(`（网络错误码：${diagnostic.netError}）`);
+    return lines.join('\n');
+  }
+
+  // 没有拿到错误码（未启用诊断，或不是网络层错误）：给出通用但可操作的信息
+  if (/Failed to fetch|NetworkError|load failed/i.test(diagnostic.rawError)) {
     return [
       `请求失败：无法连接到 ${resolved.url}。`,
-      '可能原因：① 域名不存在或拼写错误；② 网络不通；③ 服务端拒绝跨域且扩展未获得该域名的访问权限；④ HTTPS 页面访问 HTTP 接口被浏览器拦截。',
-      `（原始错误：${message}）`,
+      '',
+      '可能原因：',
+      '  ① 域名不存在或拼写错误；',
+      '  ② 本机网络不通；',
+      '  ③ 浏览器设置了代理，而目标域名被代理规则拦截或代理自身故障；',
+      '  ④ 服务端拒绝跨域且扩展未获得该域名的访问权限；',
+      '  ⑤ HTTPS 页面访问 HTTP 接口被浏览器拦截。',
+      '',
+      '想看到更精确的原因？在「⋯ → 设置」里开启「网络诊断」后重试，',
+      '工具会读取 Chrome 内部的网络错误码（例如 net::ERR_PROXY_CONNECTION_FAILED）并给出针对性建议。',
+      '',
+      `（原始错误：${diagnostic.rawError}）`,
     ].join('\n');
   }
-  return `请求失败：${message}`;
+  return `请求失败：${diagnostic.rawError}`;
 }
 
 /** 导出给 UI 用：把 KeyValue[] 转成 Record */
