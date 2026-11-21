@@ -1110,6 +1110,11 @@ export function lintVariables(text: string, scope: VariableScope): VariableRef[]
 - Body 的 raw 文本框无法在 textarea 里做富文本下划线 → 用**输入框下方的提示行**统一显示未定义变量清单（可点击定位到文本中的位置——通过 `setSelectionRange`）。
 - 如果将来换用 CodeMirror 之类，可以做行内波浪线，但那是另一个量级的工程量，不在第一版范围。
 
+> ⚠️ **已实现**：Body 的 raw 编辑器实际上**已经是 CodeMirror**（项目原有依赖），
+> 所以变量缺失是用 `@codemirror/lint` 的诊断波浪线做的，不是"输入框下方的提示行"。
+> 提示行（`VariableHints.tsx`）保留了下来，用于展示**当前请求整体**缺失的变量清单 ——
+> 覆盖 URL / Params / Headers / Body / Auth 全部位置，这是行内波浪线做不到的。
+
 **"一键补全"有两种理解，都要做**：
 1. 点击未定义变量 → 从已有变量中选一个填进去
 2. 批量：URL 里所有未定义变量一次性列出，点一个处理一个
@@ -1215,20 +1220,40 @@ export interface ExecutionResult {
 
 **行号槽（gutter）实现方案**：
 
-textarea 本身不支持行号。两种做法：
-
-| 方案 | 做法 | 复杂度 | 推荐 |
-|---|---|---|---|
-| A. 绝对定位的 gutter div | textarea 左侧放一个 `<div>` 渲染行号，滚动时用 `onScroll` 同步 `scrollTop` | 低 | ✅ |
-| B. 换用 CodeMirror 6 | 功能强大（语法高亮、折叠、跳转） | 高（+300KB 依赖） | ❌ 第一版不做 |
-
-选 A。行号槽的宽度根据最大行号动态调整。
+> ⚠️ **已实现，实际方案与初稿不同**（实现于 v1.2.0，以实现为准）。
+>
+> 初稿假设脚本编辑器是 `textarea`，所以要手写行号槽。下面是当时的对比：
+>
+> | 方案 | 做法 | 复杂度 | 初稿结论 |
+> |---|---|---|---|
+> | A. 绝对定位的 gutter div | textarea 左侧放一个 `<div>` 渲染行号，滚动时用 `onScroll` 同步 `scrollTop` | 低 | 当时选它 |
+> | B. 换用 CodeMirror 6 | 功能强大（语法高亮、折叠、跳转） | 高（+300KB 依赖） | 当时认为第一版不做 |
+>
+> **实现时发现选错了**：这个项目**本来就依赖** `@uiw/react-codemirror`（脚本编辑器早就是 CodeMirror 了），
+> 所以方案 B 的"依赖成本"是 0，而方案 A 要自己在 textarea 上手搓行号、滚动同步、错误标红三件事。
+>
+> 实际做法（全部用 CodeMirror 现成能力）：
+>
+> | 能力 | CodeMirror 的做法 |
+> |---|---|
+> | 行号 | `@codemirror/view` 内置 gutter，不用自己画 |
+> | 错误标红 | `@codemirror/lint` 的 `setDiagnostics(state, diagnostics)` |
+> | 跳转到出错行 | `view.dispatch({ selection: { anchor, head }, scrollIntoView: true })` |
+> | 输入补全 | `@codemirror/autocomplete` 的 `autocompletion({ override: [source] })` |
+>
+> 踩坑记录：`setDiagnostics` 在新版 `@codemirror/lint` 里**不是** StateEffect，
+> 而是 `(state, diagnostics) => TransactionSpec` 的工厂函数，必须写成
+> `view.dispatch(setDiagnostics(view.state, [...]))`，直接 `dispatch(setDiagnostics(...))` 会报错。
+>
+> **结论**：初稿"textarea + 手写行号槽"的判断是错的 ——
+> 它没有意识到项目已有 CodeMirror 依赖。判断"要不要引入新框架"之前，
+> 先确认现有依赖里有没有。
 
 **错误定位交互**：
 1. 脚本执行失败，Console 面板显示错误条目
 2. 错误条目上显示「第 3 行」的可点击标签
-3. 点击 → 自动切到对应标签页（前置/后置）→ 高亮该行 → 光标跳到该行（`textarea.setSelectionRange` + `focus()`）
-4. 高亮用临时 CSS class，3 秒后淡出
+3. 点击 → 自动切到对应标签页（前置/后置）→ CodeMirror `dispatch` 把光标跳到该行并滚动到可见区域
+4. 出错行由 `setDiagnostics` 持续标红（不用临时 CSS class）
 
 **已知边界**（要写进文档）：
 
@@ -1394,6 +1419,105 @@ public/manifest.json                  加 nativeMessaging（可选权限，见 5
 
 ---
 
+### 6.6 实施状态（v1.2.0 已全部实现）
+
+上表是**实施前的计划**。实际落地时做了几处调整，这里如实记录，避免后来人对着过期描述找文件。
+
+| 批次 | 状态 | 新增文件 | 单测 |
+|---|---|---|---|
+| 1 变量高亮 + 脚本行号 | ✅ 已实现 | `core/variable-lint.ts`、`core/script-error.ts` | 34 条 |
+| 2 智能补全 | ✅ 已实现 | `core/completion.ts`、`core/pm-api-catalog.ts`、`dashboard/components/SmartInput.tsx`、`dashboard/useCompletionSources.ts`、`dashboard/codemirror-completion.ts` | 28 条 |
+| 3 Postman v2.1 导入导出 | ✅ 已实现 | `core/postman-importer.ts`、`core/postman-exporter.ts` | 59 条 |
+| 4 耗时分段 | ✅ 已实现 | `core/timing.ts`、`dashboard/components/TimingPanel.tsx` | 13 条 |
+| 5 SSL + Native 伴生程序 | ✅ 已实现 | `core/http-sender.ts`、`core/native-bridge.ts`、`core/certificate.ts`、`background/native-host.ts`、`dashboard/components/SslSettings.tsx`、`native-host/*` | 48 条 |
+
+**单测总量：245 条 / 14 个文件**（v1.1.0 是 63 条）。
+
+#### 与初稿不一致的地方（以实现为准）
+
+| 项 | 初稿 | 实际 | 原因 |
+|---|---|---|---|
+| 脚本编辑器 | textarea + 手写行号槽 | **CodeMirror**（`setDiagnostics` + `dispatch`） | 项目本来就依赖 `@uiw/react-codemirror`，"引入成本"是 0 |
+| 补全落点 | `SmartTextArea.tsx` | `SmartInput.tsx` + CodeMirror 补全源 | 少写一个组件，且 CodeMirror 侧的补全体验更好 |
+| 核心层边界 | `native-bridge.ts` 里直接调 `chrome.runtime` | 拆成 `core/native-bridge.ts`（纯协议）+ `background/native-host.ts`（Chrome 适配器） | 核心层不许 import `chrome.*` 是本项目的硬规矩 |
+| multipart | 浏览器 `FormData` | **扩展侧手动序列化**（两条通道字节一致） | 走 native 通道时是 Node 在发，它不认识 `FormData`；不统一就会出现"浏览器能传文件、桥接就丢了" |
+| 权限 | `nativeMessaging` 放 `permissions` 还是 `optional_permissions` 待定 | **放 `optional_permissions`**（已实测 Chrome 接受，扩展加载正常） | 默认安装体验不受影响，只有真的要跳过校验的人才申请 |
+
+#### 实现过程中发现并修掉的真实 bug
+
+这些都不是"按设计写就行"的，是单测逼出来的：
+
+1. **补全排序失效**：`matchScore` 里「连续包含」永远被「缩写子序列」盖住 —— 因为连续子串必然也是子序列。重新排序为 精确/前缀 100 > 包含 70 > 缩写 50。
+2. **点号语境识别不出 `pm.res`**：正则要求末尾必须有点。改为「末尾有点」+「路径形式」两分支。
+3. **点号语境替换区间只覆盖 query**：会插成 `pm.pm.response`。改为覆盖整段路径。
+4. **`https://` 刚打完时补全永不触发**：word 为空导致直接返回 null。加「前一个字符是 `/` 或 `:`」特判。
+5. **API 清单与 SDK 实现不一致**：清单里的 `to.have.header` / `to.have.jsonBody` / `to.have.body` / `to.be.json` 这 4 条 SDK 根本没实现。**在 `pm-sdk.raw.js` 补上实现**（而不是删清单），并用 `tests/pm-api-catalog.test.ts` 把清单每条路径拿到沙箱真跑一遍 —— 改了 SDK 忘改清单会红。
+6. **`setDiagnostics` 用法错误**：新版 `@codemirror/lint` 里它不是 StateEffect，而是 `(state, diagnostics) => TransactionSpec`，必须 `view.dispatch(setDiagnostics(view.state, [...]))`。
+
+#### 仍然没做的事（明确不做）
+
+- ❌ 不做"假开关"：不能在扩展里捕获证书错误后伪造成功响应。
+- ❌ 不申请 `proxy` 权限，绝不修改用户代理设置。
+- ❌ 不自动修改系统信任库 —— 只给引导和命令，让用户自己决定、自己执行。
+- ❌ 不做 DNR 全局拦截，与"应用内拦截"的既有边界保持一致。
+
+#### 实机验证结果（批次 5 的验收标准）
+
+批次 5 的验收标准写的是「**实机验证**：Windows 装伴生程序 → 访问自签证书 HTTPS → 成功 + 证书体检信息正确 + 不安全模式有横幅」。
+这条已经真的跑过了，脚本是 `scripts/native-bridge-e2e.mjs`（可重复执行）：
+
+```
+[1/7] 测试变体扩展已就绪（nativeMessaging 提为必需权限）
+[2/7] 自签证书已生成
+[3/7] 自签 HTTPS 服务已启动：https://127.0.0.1:8766
+[4/7] Chrome 已启动：Chrome/156.0.8078.81
+[5/7] 扩展 ID：mjibjjikjdickpkgcedmlmjdmbedjhne
+[6/7] 伴生程序已注册（HKCU，无需管理员权限）
+
+=== NATIVE BRIDGE RESULT ===
+跳过校验 → 状态 : 200
+跳过校验 → 响应 : {"ok":true,"path":"/secure","via":"https-selfsigned"}
+跳过校验 → insecure 标记 : true
+严格校验 → 错误 : 本地桥接请求失败（SELF_SIGNED_CERT）：证书是自签名的（签发者与使用者相同）
+证书体检 → 颁发者 : localhost
+证书体检 → 自签名 : true
+证书体检 → SPKI : pgO6RA07p4m/P16okBTUfB+JI0cO+WOVjnIkOOsN5w8=
+
+PASS  桥接通道请求成功（跳过校验拿到 200）
+PASS  响应体来自 HTTPS 服务
+PASS  insecure 标记已置位（UI 会显示横幅）
+PASS  没有出现"静默降级"提示
+PASS  严格校验时因证书失败
+PASS  证书体检拿到了颁发者
+PASS  证书体检判定为自签名
+PASS  证书体检算出了 SPKI 指纹
+PASS  SPKI 指纹与 Node 独立计算一致
+```
+
+**这条链路里最有价值的一条是最后一条** —— SPKI 指纹必须和 Node 独立算出来的一致。
+如果算错了（比如误用了整张证书的哈希），参数看着像模像样，但 Chrome 会**静默不生效**，
+用户会以为"配了白名单就能用了"，其实一直没生效 —— 这类 bug 极难靠肉眼发现。
+
+**脚本怎么绕开了权限申请**：Chrome 的 `chrome.permissions.request()` 只能在真实用户手势里调用，
+自动化测试的合成手势不算数。所以脚本复制一份 `dist/` 当"测试变体"，
+把 `nativeMessaging` 从可选权限提成必需权限 —— 验证的是"装了伴生程序之后到底能不能用"，
+而不是"权限弹窗能不能点开"。
+
+**脚本会写注册表**：它往 `HKCU\Software\Google\Chrome\NativeMessagingHosts` 下写一个键，跑完自动删掉。
+想留着手动体验就加 `--keep-host`。
+
+#### 伴生程序自测
+
+`native-host/selftest.mjs` 是伴生程序自己的自测（31 项，全部打本地 127.0.0.1，不依赖外网）：
+
+```
+=== 结果：31 通过 / 0 失败 ===
+```
+
+它已经接进 CI —— 协议层的回归不该等到发版才发现。
+
+---
+
 ## 7. 验收标准汇总
 
 ### 通用（每批次都必须满足）
@@ -1515,12 +1639,12 @@ node scripts/probe-security-info.mjs --headful  # 有头模式（窗口挪到屏
 
 ## 9. 未决问题
 
-| 问题 | 影响 | 建议 |
-|---|---|---|
-| `nativeMessaging` 能否作为可选权限 | 决定扩展默认安装是否显示"启动本机程序"警告 | 实现批次 5 时实测 |
-| Postman 环境变量导入时，是新建环境还是合并到当前环境 | 影响导入 UX | 导入预览里让用户选 |
-| 是否支持 Postman 的 `prerequest`/`test` 事件里的多个脚本 | 低频 | 合并成一个脚本（用换行拼接） |
-| 耗时分段是否值得为它单独申请 `webRequest` | 已经因为诊断功能申请了 | 复用，零额外成本 |
+| 问题 | 影响 | 建议 | 状态 |
+|---|---|---|---|
+| `nativeMessaging` 能否作为可选权限 | 决定扩展默认安装是否显示"启动本机程序"警告 | 实现批次 5 时实测 | ✅ **已解决**：可以放在 `optional_permissions`，Chrome 正常加载扩展；权限只在用户点「授权并检测桥接程序」时才申请 |
+| Postman 环境变量导入时，是新建环境还是合并到当前环境 | 影响导入 UX | 导入预览里让用户选 | ✅ **已实现**：顶层 `variable[]` → 新建 Environment（往返不对称已用测试钉死） |
+| 是否支持 Postman 的 `prerequest`/`test` 事件里的多个脚本 | 低频 | 合并成一个脚本（用换行拼接） | ✅ **已实现**：合并 |
+| 耗时分段是否值得为它单独申请 `webRequest` | 已经因为诊断功能申请了 | 复用，零额外成本 | ✅ **已实现**：复用同一个可选权限 |
 
 ---
 
