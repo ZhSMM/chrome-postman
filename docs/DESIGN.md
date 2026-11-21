@@ -3,6 +3,10 @@
 > 基于 Chrome 扩展（Manifest V3）实现的类 Postman API 调试工具
 > 版本 1.0.0 · 技术栈 React 18 + TypeScript + Vite + QuickJS(WASM)
 
+> **📌 本文档描述的是已实现的 v1.0/v1.1。**
+> v1.2 的设计方案（SSL 验证、自签名证书访问方案、输入框智能补全、Postman 集合导入导出、耗时分段、变量高亮、错误行号定位）见 **[`DESIGN-v1.2.md`](./DESIGN-v1.2.md)**。
+> 那份文档开篇有「事实基线」一节，记录了所有关键技术判断的实测依据。
+
 ---
 
 ## 目录

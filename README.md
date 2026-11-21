@@ -104,7 +104,8 @@ chrome-postman/
 ├── tests/                         # 45 条单元测试
 ├── scripts/                       # 构建 / 打包 / 验证脚本
 └── docs/
-    ├── DESIGN.md                  # 设计文档
+    ├── DESIGN.md                  # v1.0/v1.1 设计文档（已实现）
+    ├── DESIGN-v1.2.md             # v1.2 设计方案（SSL / 补全 / 易用与定位）
     ├── CHROME-API-REFERENCE.md    # Chrome API 详解（教学向）
     ├── USAGE-GUIDE.md             # 使用指南 + 脚本手册
     └── screenshots/
@@ -113,6 +114,7 @@ chrome-postman/
 ## 文档
 
 - **[设计文档](./docs/DESIGN.md)** —— 架构、模块、数据流、关键技术决策与取舍
+- **[v1.2 设计方案](./docs/DESIGN-v1.2.md)** —— SSL 验证与自签名证书方案、输入框智能补全、Postman 集合导入导出、耗时分段、变量高亮、错误行号定位。开篇有实测「事实基线」
 - **[Chrome API 详解](./docs/CHROME-API-REFERENCE.md)** —— 每个 API 的参数表、示例与踩坑
 - **[使用指南](./docs/USAGE-GUIDE.md)** —— 上手、脚本 API 手册、断言参考、FAQ
 
